@@ -1,0 +1,17 @@
+CREATE TABLE organizations (
+    id UUID PRIMARY KEY,
+
+    slug VARCHAR(80) NOT NULL
+        UNIQUE,
+
+    name VARCHAR(160) NOT NULL,
+
+    status VARCHAR(32) NOT NULL
+        CHECK (status IN ('ACTIVE', 'SUSPENDED')),
+
+    created_at TIMESTAMPTZ NOT NULL
+        DEFAULT CURRENT_TIMESTAMP,
+
+    updated_at TIMESTAMPTZ NOT NULL
+        DEFAULT CURRENT_TIMESTAMP
+);

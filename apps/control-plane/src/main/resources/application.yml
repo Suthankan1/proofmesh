@@ -1,0 +1,34 @@
+spring:
+  application:
+    name: proofmesh-control-plane
+
+  jpa:
+    open-in-view: false
+
+    hibernate:
+      ddl-auto: validate
+
+    properties:
+      hibernate:
+        default_schema: proofmesh
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    default-schema: proofmesh
+    schemas: proofmesh
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+server:
+  shutdown: graceful

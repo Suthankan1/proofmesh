@@ -1,0 +1,5 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:${POSTGRES_PORT:5432}/${POSTGRES_DB:proofmesh}
+    username: ${POSTGRES_USER:proofmesh}
+    password: ${POSTGRES_PASSWORD:proofmesh_dev_only}
