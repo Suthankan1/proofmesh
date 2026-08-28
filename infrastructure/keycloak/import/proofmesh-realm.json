@@ -1,0 +1,113 @@
+{
+  "realm": "proofmesh",
+  "displayName": "ProofMesh",
+  "enabled": true,
+
+  "registrationAllowed": false,
+  "registrationEmailAsUsername": false,
+  "rememberMe": true,
+
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+
+  "bruteForceProtected": true,
+
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+
+  "roles": {
+    "realm": [
+      {
+        "name": "PLATFORM_ADMIN",
+        "description": "ProofMesh platform administrator"
+      },
+      {
+        "name": "APPROVER",
+        "description": "Reviews and decides eligible approval requests"
+      },
+      {
+        "name": "SECURITY_OPERATOR",
+        "description": "Investigates security activity, evidence, incidents and replay"
+      },
+      {
+        "name": "VIEWER",
+        "description": "Read-only ProofMesh operator"
+      }
+    ]
+  },
+
+  "clients": [
+    {
+      "clientId": "proofmesh-control-plane",
+      "name": "ProofMesh Control Plane",
+      "description": "OAuth2 resource server for the ProofMesh governance API",
+
+      "enabled": true,
+      "protocol": "openid-connect",
+
+      "bearerOnly": true,
+      "publicClient": false,
+
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false
+    },
+
+    {
+      "clientId": "proofmesh-web",
+      "name": "ProofMesh Web BFF",
+      "description": "Server-side OIDC client for the ProofMesh operator console",
+
+      "enabled": true,
+      "protocol": "openid-connect",
+
+      "bearerOnly": false,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KEYCLOAK_WEB_CLIENT_SECRET}",
+
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+
+      "redirectUris": [
+        "http://localhost:3000/*"
+      ],
+
+      "webOrigins": [
+        "http://localhost:3000"
+      ],
+
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3000/*"
+      },
+
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "email",
+        "roles",
+        "web-origins"
+      ],
+
+      "protocolMappers": [
+        {
+          "name": "proofmesh-control-plane-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "proofmesh-control-plane",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -2,15 +2,12 @@ services:
   postgres:
     image: postgres:18.6-alpine
     container_name: proofmesh-postgres
-
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-proofmesh}
       POSTGRES_USER: ${POSTGRES_USER:-proofmesh}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-proofmesh_dev_only}
-
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
-
     healthcheck:
       test:
         [
@@ -20,9 +17,57 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-
     volumes:
       - proofmesh_postgres_data:/var/lib/postgresql
 
+  keycloak-db:
+    image: postgres:18.6-alpine
+    container_name: proofmesh-keycloak-db
+    environment:
+      POSTGRES_DB: ${KEYCLOAK_DB:-keycloak}
+      POSTGRES_USER: ${KEYCLOAK_DB_USER:-keycloak}
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-proofmesh_keycloak_db_dev_only}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - proofmesh_keycloak_postgres_data:/var/lib/postgresql
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.2
+    container_name: proofmesh-keycloak
+    command:
+      - start-dev
+      - --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-proofmesh_admin_dev_only}
+
+      KC_DB: postgres
+      KC_DB_URL: "jdbc:postgresql://keycloak-db:5432/${KEYCLOAK_DB:-keycloak}"
+      KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-proofmesh_keycloak_db_dev_only}
+
+      KC_HEALTH_ENABLED: "true"
+
+      KEYCLOAK_WEB_CLIENT_SECRET: ${KEYCLOAK_WEB_CLIENT_SECRET:-proofmesh_web_dev_only}
+
+    ports:
+      - "127.0.0.1:${KEYCLOAK_PORT:-8081}:8080"
+
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+
+    volumes:
+      - ./infrastructure/keycloak/import:/opt/keycloak/data/import:ro
+
 volumes:
   proofmesh_postgres_data:
+  proofmesh_keycloak_postgres_data:

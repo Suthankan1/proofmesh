@@ -19,6 +19,15 @@ spring:
     default-schema: proofmesh
     schemas: proofmesh
 
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8081/realms/proofmesh}
+          jwk-set-uri: ${OIDC_JWK_SET_URI:http://localhost:8081/realms/proofmesh/protocol/openid-connect/certs}
+          audiences:
+            - ${OIDC_AUDIENCE:proofmesh-control-plane}
+
 management:
   endpoints:
     web:

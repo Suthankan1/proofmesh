@@ -16,19 +16,24 @@ class DatabaseMigrationTest {
     JdbcTemplate jdbcTemplate;
 
     @Test
-    void flywayCreatesOrganizationTable() {
-        Boolean exists = jdbcTemplate.queryForObject(
+    void flywayCreatesIdentityTables() {
+        assertThat(tableExists("organizations")).isTrue();
+        assertThat(tableExists("operator_users")).isTrue();
+        assertThat(tableExists("organization_memberships")).isTrue();
+    }
+
+    private Boolean tableExists(String tableName) {
+        return jdbcTemplate.queryForObject(
                 """
                 SELECT EXISTS (
                     SELECT 1
                     FROM information_schema.tables
                     WHERE table_schema = 'proofmesh'
-                      AND table_name = 'organizations'
+                    AND table_name = ?
                 )
                 """,
-                Boolean.class
+                Boolean.class,
+                tableName
         );
-
-        assertThat(exists).isTrue();
     }
 }
