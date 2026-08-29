@@ -9,6 +9,7 @@
     "web:dev": "pnpm --filter web dev",
     "web:lint": "pnpm --filter web lint",
     "web:typecheck": "pnpm --filter web exec tsc --noEmit",
-    "web:build": "pnpm --filter web build"
+    "web:build": "pnpm --filter web build",
+    "web:auth:migrate": "pnpm --filter web exec auth migrate --config ./src/lib/auth/auth.ts"
   }
 }
