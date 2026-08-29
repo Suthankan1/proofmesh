@@ -1,0 +1,14 @@
+{
+  "name": "proofmesh",
+  "private": true,
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "web:dev": "pnpm --filter web dev",
+    "web:lint": "pnpm --filter web lint",
+    "web:typecheck": "pnpm --filter web exec tsc --noEmit",
+    "web:build": "pnpm --filter web build"
+  }
+}
