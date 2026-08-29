@@ -1,8 +1,10 @@
 import "server-only";
 
-import { auth } from "@/lib/auth/auth";
+import {
+  isAPIError,
+} from "better-auth/api";
 
-const KEYCLOAK_PROVIDER_ID = "keycloak";
+import { auth } from "@/lib/auth/auth";
 
 export class KeycloakAccountNotLinkedError extends Error {
   constructor() {
@@ -14,13 +16,13 @@ export class KeycloakAccountNotLinkedError extends Error {
   }
 }
 
-export class KeycloakAccessTokenUnavailableError extends Error {
+export class KeycloakReauthenticationRequiredError extends Error {
   constructor() {
     super(
-      "A Keycloak access token is unavailable for the authenticated user.",
+      "The Keycloak session can no longer provide a valid access token.",
     );
 
-    this.name = "KeycloakAccessTokenUnavailableError";
+    this.name = "KeycloakReauthenticationRequiredError";
   }
 }
 
@@ -35,26 +37,44 @@ export async function getKeycloakAccessToken(
   const keycloakAccount =
     accounts.find(
       (account) =>
-        account.providerId ===
-        KEYCLOAK_PROVIDER_ID,
+        account.providerId === "keycloak",
     );
 
   if (!keycloakAccount) {
     throw new KeycloakAccountNotLinkedError();
   }
 
-  const token =
-    await auth.api.getAccessToken({
+  try {
+    const token =
+      await auth.api.getAccessToken({
         headers: requestHeaders,
 
         body: {
-        accountId: keycloakAccount.id,
+          accountId: keycloakAccount.id,
         },
-    });
+      });
 
-  if (!token.accessToken) {
-    throw new KeycloakAccessTokenUnavailableError();
+    if (!token.accessToken) {
+      throw new KeycloakReauthenticationRequiredError();
+    }
+
+    return token.accessToken;
+  } catch (error) {
+    if (
+      error instanceof
+        KeycloakReauthenticationRequiredError
+    ) {
+      throw error;
+    }
+
+    if (
+      isAPIError(error) &&
+      error.body?.code ===
+        "FAILED_TO_GET_ACCESS_TOKEN"
+    ) {
+      throw new KeycloakReauthenticationRequiredError();
+    }
+
+    throw error;
   }
-
-  return token.accessToken;
 }

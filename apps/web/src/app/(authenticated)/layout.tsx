@@ -5,6 +5,9 @@ import { redirect } from "next/navigation";
 import { AppShell } from "@/components/layout/app-shell";
 import { auth } from "@/lib/auth/auth";
 import {
+  KeycloakReauthenticationRequiredError,
+} from "@/lib/auth/keycloak-access-token";
+import {
   getOperatorContext,
 } from "@/lib/auth/operator-context";
 import {
@@ -18,28 +21,37 @@ type AuthenticatedLayoutProps = {
 export default async function AuthenticatedLayout({
   children,
 }: AuthenticatedLayoutProps) {
-  const requestHeaders =
-    await headers();
+  const requestHeaders = await headers();
 
-  const session =
-    await auth.api.getSession({
-      headers: requestHeaders,
-    });
+  const session = await auth.api.getSession({
+    headers: requestHeaders,
+  });
 
   if (!session) {
     redirect("/sign-in");
   }
 
-  const operator =
-    await getOperatorContext(
+  let operator;
+
+  try {
+    operator = await getOperatorContext(
       requestHeaders,
     );
+  } catch (error) {
+    if (
+      error instanceof
+      KeycloakReauthenticationRequiredError
+    ) {
+      redirect("/auth/reauthenticate");
+    }
+
+    throw error;
+  }
 
   return (
     <AppShell
       organizationName={
-        operator.organization
-          .organizationSlug
+        operator.organization.organizationSlug
       }
       roleLabel={formatRoleLabel(
         operator.proofMeshAuthorities,

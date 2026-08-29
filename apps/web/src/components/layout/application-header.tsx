@@ -1,3 +1,5 @@
+import { SignOutButton } from "@/features/auth/sign-out-button";
+
 type ApplicationHeaderProps = {
   organizationName: string;
   roleLabel: string;
@@ -24,6 +26,8 @@ export function ApplicationHeader({
           <span className="rounded-md bg-surface-subtle px-2.5 py-1 text-xs font-semibold text-foreground-secondary">
             {roleLabel}
           </span>
+
+          <SignOutButton />
         </div>
       </div>
     </header>

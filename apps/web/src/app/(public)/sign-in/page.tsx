@@ -5,14 +5,29 @@ import { SurfaceCard } from "@/components/ui/surface-card";
 import { SignInButton } from "@/features/auth/sign-in-button";
 import { auth } from "@/lib/auth/auth";
 
-export default async function SignInPage() {
+type SignInPageProps = {
+  searchParams: Promise<{
+    reason?: string;
+  }>;
+};
+
+export default async function SignInPage({
+  searchParams,
+}: SignInPageProps) {
+  const requestHeaders = await headers();
+
   const session = await auth.api.getSession({
-    headers: await headers(),
+    headers: requestHeaders,
   });
 
   if (session) {
     redirect("/dashboard");
   }
+
+  const { reason } = await searchParams;
+
+  const sessionExpired =
+    reason === "session-expired";
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-canvas px-6 py-12">
@@ -40,6 +55,16 @@ export default async function SignInPage() {
             Authenticate through the ProofMesh identity provider
             to access runtime governance and assurance workflows.
           </p>
+
+          {sessionExpired ? (
+            <div
+              role="status"
+              className="mt-5 rounded-md border border-warning-foreground/15 bg-warning-bg px-4 py-3 text-sm text-warning-foreground"
+            >
+              Your identity-provider session expired.
+              Sign in again to continue.
+            </div>
+          ) : null}
 
           <div className="mt-7">
             <SignInButton />
