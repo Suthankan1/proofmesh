@@ -4,6 +4,12 @@ import { redirect } from "next/navigation";
 
 import { AppShell } from "@/components/layout/app-shell";
 import { auth } from "@/lib/auth/auth";
+import {
+  getOperatorContext,
+} from "@/lib/auth/operator-context";
+import {
+  formatRoleLabel,
+} from "@/lib/auth/role-label";
 
 type AuthenticatedLayoutProps = {
   children: ReactNode;
@@ -12,18 +18,32 @@ type AuthenticatedLayoutProps = {
 export default async function AuthenticatedLayout({
   children,
 }: AuthenticatedLayoutProps) {
-  const session = await auth.api.getSession({
-    headers: await headers(),
-  });
+  const requestHeaders =
+    await headers();
+
+  const session =
+    await auth.api.getSession({
+      headers: requestHeaders,
+    });
 
   if (!session) {
     redirect("/sign-in");
   }
 
+  const operator =
+    await getOperatorContext(
+      requestHeaders,
+    );
+
   return (
     <AppShell
-      organizationName="ProofMesh Demo"
-      roleLabel={session.user.email}
+      organizationName={
+        operator.organization
+          .organizationSlug
+      }
+      roleLabel={formatRoleLabel(
+        operator.proofMeshAuthorities,
+      )}
     >
       {children}
     </AppShell>

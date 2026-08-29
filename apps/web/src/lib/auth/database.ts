@@ -1,3 +1,4 @@
+import "server-only";
 import { Pool } from "pg";
 
 import { serverEnv } from "@/lib/config/server-env";
