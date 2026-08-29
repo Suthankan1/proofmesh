@@ -3,6 +3,8 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { AppShell } from "@/components/layout/app-shell";
+import { ControlPlaneFailure } from "@/features/system/control-plane-failure";
+import { ControlPlaneError } from "@/lib/api/control-plane-error";
 import { auth } from "@/lib/auth/auth";
 import {
   KeycloakReauthenticationRequiredError,
@@ -43,6 +45,14 @@ export default async function AuthenticatedLayout({
       KeycloakReauthenticationRequiredError
     ) {
       redirect("/auth/reauthenticate");
+    }
+
+    if (error instanceof ControlPlaneError) {
+      return (
+        <ControlPlaneFailure
+          kind={error.kind}
+        />
+      );
     }
 
     throw error;

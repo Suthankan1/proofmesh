@@ -4,7 +4,13 @@ import {
   getIdentity,
   getOrganizationContext,
 } from "@/lib/api/control-plane-client";
-import { getKeycloakAccessToken } from "@/lib/auth/keycloak-access-token";
+import {
+  ControlPlaneError,
+} from "@/lib/api/control-plane-error";
+import {
+  getKeycloakAccessToken,
+  KeycloakReauthenticationRequiredError,
+} from "@/lib/auth/keycloak-access-token";
 
 const proofMeshAuthorities = [
   "ROLE_PLATFORM_ADMIN",
@@ -45,17 +51,33 @@ export async function getOperatorContext(
       requestHeaders,
     );
 
-  const [
-    identity,
-    organization,
-  ] = await Promise.all([
-    getIdentity(accessToken),
-    getOrganizationContext(accessToken),
-  ]);
+  let identity;
+  let organization;
+
+  try {
+    [
+      identity,
+      organization,
+    ] = await Promise.all([
+      getIdentity(accessToken),
+      getOrganizationContext(
+        accessToken,
+      ),
+    ]);
+  } catch (error) {
+    if (
+      error instanceof ControlPlaneError &&
+      error.kind === "UNAUTHORIZED"
+    ) {
+      throw new KeycloakReauthenticationRequiredError();
+    }
+
+    throw error;
+  }
 
   if (
     identity.subject !==
-      organization.oidcSubject
+    organization.oidcSubject
   ) {
     throw new Error(
       "Identity and organization context subjects do not match.",
