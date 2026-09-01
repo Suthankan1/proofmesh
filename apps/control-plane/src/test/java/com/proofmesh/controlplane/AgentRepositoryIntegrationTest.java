@@ -16,9 +16,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.annotation.Transactional;
 
 @SpringBootTest
 @Import(TestcontainersConfiguration.class)
+@Transactional
 class AgentRepositoryIntegrationTest {
 
     private static final UUID ORGANIZATION_ID =
@@ -44,26 +46,6 @@ class AgentRepositoryIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.governed_actions"
-        );
-
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.agents"
-        );
-
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.organization_memberships"
-        );
-
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.operator_users"
-        );
-
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.organizations"
-        );
-
         jdbcTemplate.update(
                 """
                 INSERT INTO proofmesh.organizations (
@@ -122,34 +104,47 @@ class AgentRepositoryIntegrationTest {
                                 ORGANIZATION_ID
                         );
 
-        assertThat(result).isPresent();
+        assertThat(result)
+                .isPresent();
 
-        Agent agent = result.orElseThrow();
+        Agent agent =
+                result.orElseThrow();
 
-        assertThat(agent.id())
-                .isEqualTo(AGENT_ID);
+        assertThat(
+                agent.id()
+        ).isEqualTo(
+                AGENT_ID
+        );
 
-        assertThat(agent.organizationId())
-                .isEqualTo(ORGANIZATION_ID);
+        assertThat(
+                agent.organizationId()
+        ).isEqualTo(
+                ORGANIZATION_ID
+        );
 
-        assertThat(agent.name())
-                .isEqualTo(
-                        "Finance Refund Agent"
-                );
+        assertThat(
+                agent.name()
+        ).isEqualTo(
+                "Finance Refund Agent"
+        );
 
-        assertThat(agent.status())
-                .isEqualTo(
-                        AgentStatus.ACTIVE
-                );
+        assertThat(
+                agent.status()
+        ).isEqualTo(
+                AgentStatus.ACTIVE
+        );
 
-        assertThat(agent.isActive())
-                .isTrue();
+        assertThat(
+                agent.isActive()
+        ).isTrue();
 
-        assertThat(agent.createdAt())
-                .isNotNull();
+        assertThat(
+                agent.createdAt()
+        ).isNotNull();
 
-        assertThat(agent.updatedAt())
-                .isNotNull();
+        assertThat(
+                agent.updatedAt()
+        ).isNotNull();
     }
 
     @Test
@@ -161,6 +156,7 @@ class AgentRepositoryIntegrationTest {
                                 OTHER_ORGANIZATION_ID
                         );
 
-        assertThat(result).isEmpty();
+        assertThat(result)
+                .isEmpty();
     }
 }
