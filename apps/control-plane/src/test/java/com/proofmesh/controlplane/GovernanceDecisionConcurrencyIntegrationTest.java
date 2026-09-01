@@ -41,6 +41,7 @@ class GovernanceDecisionConcurrencyIntegrationTest {
 
     private PolicyVersionId policyVersionId;
     private PolicyRuleId policyRuleId;
+    private PolicyRuleId denyPolicyRuleId;
 
     @Autowired
     JdbcTemplate jdbcTemplate;
@@ -72,9 +73,15 @@ class GovernanceDecisionConcurrencyIntegrationTest {
                         UUID.randomUUID()
                 );
 
+        denyPolicyRuleId =
+                new PolicyRuleId(
+                        UUID.randomUUID()
+                );
+
         insertOrganization();
         insertAgent();
         insertGovernedAction();
+        insertRiskAssessment();
         insertPolicy();
         insertPublishedPolicyVersion();
     }
@@ -181,14 +188,14 @@ class GovernanceDecisionConcurrencyIntegrationTest {
         CountDownLatch start =
                 new CountDownLatch(1);
 
-        PolicyEvaluationResult firstEvaluation =
+        PolicyEvaluationResult approval =
                 approvalEvaluation(
                         90
                 );
 
-        PolicyEvaluationResult secondEvaluation =
-                approvalEvaluation(
-                        80
+        PolicyEvaluationResult deny =
+                denyEvaluation(
+                        90
                 );
 
         try (ExecutorService executor =
@@ -198,7 +205,7 @@ class GovernanceDecisionConcurrencyIntegrationTest {
                     executor.submit(
                             observingTask(
                                     UUID.randomUUID(),
-                                    firstEvaluation,
+                                    approval,
                                     Instant.parse(
                                             "2026-09-01T06:10:00Z"
                                     ),
@@ -211,7 +218,7 @@ class GovernanceDecisionConcurrencyIntegrationTest {
                     executor.submit(
                             observingTask(
                                     UUID.randomUUID(),
-                                    secondEvaluation,
+                                    deny,
                                     Instant.parse(
                                             "2026-09-01T06:10:01Z"
                                     ),
@@ -284,6 +291,26 @@ class GovernanceDecisionConcurrencyIntegrationTest {
                             .findFirst()
                             .orElseThrow();
 
+            String persistedOutcome =
+                    jdbcTemplate.queryForObject(
+                            """
+                            SELECT outcome
+                            FROM proofmesh.governance_decisions
+                            WHERE organization_id = ?
+                              AND governed_action_id = ?
+                            """,
+                            String.class,
+                            organizationId,
+                            actionId
+                    );
+
+            assertThat(
+                    persistedOutcome
+            ).isEqualTo(
+                    winner.outcome()
+                            .name()
+            );
+
             Integer persistedRiskScore =
                     jdbcTemplate.queryForObject(
                             """
@@ -300,8 +327,7 @@ class GovernanceDecisionConcurrencyIntegrationTest {
             assertThat(
                     persistedRiskScore
             ).isEqualTo(
-                    winner.riskScore()
-                            .value()
+                    90
             );
         }
     }
@@ -372,6 +398,24 @@ class GovernanceDecisionConcurrencyIntegrationTest {
                 List.of(
                         new DecisionReasonCode(
                                 "HIGH_RISK_REFUND"
+                        )
+                )
+        );
+    }
+
+    private PolicyEvaluationResult denyEvaluation(
+            int riskScore
+    ) {
+        return new PolicyEvaluationResult.Matched(
+                policyVersionId,
+                denyPolicyRuleId,
+                DecisionOutcome.DENY,
+                new RiskScore(
+                        riskScore
+                ),
+                List.of(
+                        new DecisionReasonCode(
+                                "REFUND_BLOCKED"
                         )
                 )
         );
@@ -479,6 +523,49 @@ class GovernanceDecisionConcurrencyIntegrationTest {
         );
     }
 
+    private void insertRiskAssessment() {
+        jdbcTemplate.update(
+                """
+                INSERT INTO proofmesh.risk_assessments (
+                    id,
+                    organization_id,
+                    governed_action_id,
+                    logic_version,
+                    risk_score,
+                    signals,
+                    assessed_at
+                )
+                VALUES (
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    CAST(? AS jsonb),
+                    ?
+                )
+                """,
+                UUID.randomUUID(),
+                organizationId,
+                actionId,
+                "test-v1",
+                90,
+                """
+                [
+                  {
+                    "code": "HIGH_RISK_OPERATION",
+                    "severity": "HIGH",
+                    "weight": 90,
+                    "explanation": "Authoritative risk for concurrent governance decisions."
+                  }
+                ]
+                """,
+                OffsetDateTime.parse(
+                        "2026-09-01T05:45:00Z"
+                )
+        );
+    }
+
     private void insertPolicy() {
         jdbcTemplate.update(
                 """
@@ -516,12 +603,26 @@ class GovernanceDecisionConcurrencyIntegrationTest {
                       },
                       "effect": "REQUIRE_APPROVAL",
                       "reasonCode": "HIGH_RISK_REFUND"
+                    },
+                    {
+                      "id": "%s",
+                      "priority": 200,
+                      "target": {
+                        "tool": "stripe",
+                        "operation": "refund_payment"
+                      },
+                      "risk": {
+                        "minimum": 0
+                      },
+                      "effect": "DENY",
+                      "reasonCode": "REFUND_BLOCKED"
                     }
                   ]
                 }
                 """
                         .formatted(
-                                policyRuleId.value()
+                                policyRuleId.value(),
+                                denyPolicyRuleId.value()
                         );
 
         jdbcTemplate.update(

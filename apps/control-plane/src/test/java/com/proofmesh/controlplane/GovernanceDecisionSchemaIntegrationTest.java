@@ -96,6 +96,11 @@ class GovernanceDecisionSchemaIntegrationTest {
                     "b6000000-0000-0000-0000-000000000099"
             );
 
+    private static final UUID RISK_ASSESSMENT_ID =
+            UUID.fromString(
+                    "b6500000-0000-0000-0000-000000000001"
+            );
+
     private static final UUID DECISION_ID =
             UUID.fromString(
                     "b7000000-0000-0000-0000-000000000001"
@@ -114,6 +119,11 @@ class GovernanceDecisionSchemaIntegrationTest {
     private static final OffsetDateTime PUBLISHED_AT =
             OffsetDateTime.parse(
                     "2026-09-01T00:30:00Z"
+            );
+
+    private static final OffsetDateTime ASSESSED_AT =
+            OffsetDateTime.parse(
+                    "2026-09-01T00:40:00Z"
             );
 
     private static final OffsetDateTime DECIDED_AT =
@@ -195,6 +205,13 @@ class GovernanceDecisionSchemaIntegrationTest {
                 POLICY_ID,
                 ORGANIZATION_ID,
                 2
+        );
+
+        insertRiskAssessment(
+                RISK_ASSESSMENT_ID,
+                ORGANIZATION_ID,
+                ACTION_ID,
+                90
         );
     }
 
@@ -289,7 +306,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                 POLICY_VERSION_ID,
                 null,
                 "DENY",
-                25,
+                90,
                 """
                 [
                   "NO_APPLICABLE_POLICY_RULE"
@@ -322,7 +339,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                         POLICY_VERSION_ID,
                         DENY_POLICY_RULE_ID,
                         "DENY",
-                        80,
+                        90,
                         """
                         [
                           "REFUND_BLOCKED"
@@ -345,7 +362,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                         OTHER_POLICY_VERSION_ID,
                         DENY_POLICY_RULE_ID,
                         "DENY",
-                        80,
+                        90,
                         """
                         [
                           "REFUND_BLOCKED"
@@ -368,7 +385,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                         DRAFT_POLICY_VERSION_ID,
                         ALLOW_POLICY_RULE_ID,
                         "ALLOW",
-                        10,
+                        90,
                         """
                         [
                           "STANDARD_REFUND"
@@ -394,7 +411,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                         POLICY_VERSION_ID,
                         UNKNOWN_POLICY_RULE_ID,
                         "ALLOW",
-                        10,
+                        90,
                         """
                         [
                           "STANDARD_REFUND"
@@ -420,7 +437,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                         POLICY_VERSION_ID,
                         null,
                         "ALLOW",
-                        10,
+                        90,
                         """
                         [
                           "STANDARD_REFUND"
@@ -466,7 +483,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                         POLICY_VERSION_ID,
                         null,
                         "DENY",
-                        10,
+                        90,
                         """
                         []
                         """
@@ -487,7 +504,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                         POLICY_VERSION_ID,
                         null,
                         "DENY",
-                        10,
+                        90,
                         """
                         [
                           "NO_APPLICABLE_POLICY_RULE",
@@ -511,7 +528,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                         POLICY_VERSION_ID,
                         null,
                         "DENY",
-                        10,
+                        90,
                         """
                         [
                           "invalid reason code"
@@ -533,7 +550,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                 POLICY_VERSION_ID,
                 ALLOW_POLICY_RULE_ID,
                 "ALLOW",
-                10,
+                90,
                 """
                 [
                   "STANDARD_REFUND"
@@ -549,7 +566,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                         POLICY_VERSION_ID,
                         ALLOW_POLICY_RULE_ID,
                         "ALLOW",
-                        10,
+                        90,
                         """
                         [
                           "STANDARD_REFUND"
@@ -649,6 +666,58 @@ class GovernanceDecisionSchemaIntegrationTest {
                 )
                 .contains(
                         "RUNTIME_CONTEXT_VERIFIED"
+                );
+    }
+
+    @Test
+    void rejectsDecisionWithoutAuthoritativeRiskAssessment() {
+        assertThatThrownBy(
+                () -> insertDecision(
+                        DECISION_ID,
+                        OTHER_ORGANIZATION_ID,
+                        OTHER_ACTION_ID,
+                        OTHER_POLICY_VERSION_ID,
+                        POLICY_RULE_ID,
+                        "REQUIRE_APPROVAL",
+                        90,
+                        """
+                        [
+                          "HIGH_RISK_REFUND"
+                        ]
+                        """
+                )
+        )
+                .isInstanceOf(
+                        DataIntegrityViolationException.class
+                )
+                .hasMessageContaining(
+                        "requires an authoritative risk assessment"
+                );
+    }
+
+    @Test
+    void rejectsDecisionWhoseRiskScoreDiffersFromAuthoritativeAssessment() {
+        assertThatThrownBy(
+                () -> insertDecision(
+                        DECISION_ID,
+                        ORGANIZATION_ID,
+                        ACTION_ID,
+                        POLICY_VERSION_ID,
+                        POLICY_RULE_ID,
+                        "REQUIRE_APPROVAL",
+                        80,
+                        """
+                        [
+                          "HIGH_RISK_REFUND"
+                        ]
+                        """
+                )
+        )
+                .isInstanceOf(
+                        DataIntegrityViolationException.class
+                )
+                .hasMessageContaining(
+                        "risk score does not match the authoritative risk assessment"
                 );
     }
 
@@ -810,6 +879,52 @@ class GovernanceDecisionSchemaIntegrationTest {
                 """,
                 "a".repeat(64),
                 CREATED_AT
+        );
+    }
+
+    private void insertRiskAssessment(
+            UUID riskAssessmentId,
+            UUID organizationId,
+            UUID governedActionId,
+            int riskScore
+    ) {
+        jdbcTemplate.update(
+                """
+                INSERT INTO proofmesh.risk_assessments (
+                    id,
+                    organization_id,
+                    governed_action_id,
+                    logic_version,
+                    risk_score,
+                    signals,
+                    assessed_at
+                )
+                VALUES (
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    CAST(? AS jsonb),
+                    ?
+                )
+                """,
+                riskAssessmentId,
+                organizationId,
+                governedActionId,
+                "test-v1",
+                riskScore,
+                """
+                [
+                  {
+                    "code": "HIGH_RISK_OPERATION",
+                    "severity": "HIGH",
+                    "weight": 90,
+                    "explanation": "Authoritative risk assessment for governance decision schema integration."
+                  }
+                ]
+                """,
+                ASSESSED_AT
         );
     }
 

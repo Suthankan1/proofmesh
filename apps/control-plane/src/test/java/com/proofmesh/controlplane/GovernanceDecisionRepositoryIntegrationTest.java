@@ -70,6 +70,11 @@ class GovernanceDecisionRepositoryIntegrationTest {
                     )
             );
 
+    private static final UUID RISK_ASSESSMENT_ID =
+            UUID.fromString(
+                    "c6500000-0000-0000-0000-000000000001"
+            );
+
     private static final UUID DECISION_ID =
             UUID.fromString(
                     "c7000000-0000-0000-0000-000000000001"
@@ -93,6 +98,11 @@ class GovernanceDecisionRepositoryIntegrationTest {
     private static final OffsetDateTime PUBLISHED_AT =
             OffsetDateTime.parse(
                     "2026-09-01T00:30:00Z"
+            );
+
+    private static final OffsetDateTime ASSESSED_AT =
+            OffsetDateTime.parse(
+                    "2026-09-01T00:45:00Z"
             );
 
     @Autowired
@@ -190,6 +200,45 @@ class GovernanceDecisionRepositoryIntegrationTest {
                 """,
                 "a".repeat(64),
                 CREATED_AT
+        );
+
+        jdbcTemplate.update(
+                """
+                INSERT INTO proofmesh.risk_assessments (
+                    id,
+                    organization_id,
+                    governed_action_id,
+                    logic_version,
+                    risk_score,
+                    signals,
+                    assessed_at
+                )
+                VALUES (
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    CAST(? AS jsonb),
+                    ?
+                )
+                """,
+                RISK_ASSESSMENT_ID,
+                ORGANIZATION_ID,
+                ACTION_ID,
+                "test-v1",
+                90,
+                """
+                [
+                  {
+                    "code": "HIGH_RISK_OPERATION",
+                    "severity": "HIGH",
+                    "weight": 90,
+                    "explanation": "Authoritative risk for governance decision repository integration."
+                  }
+                ]
+                """,
+                ASSESSED_AT
         );
 
         jdbcTemplate.update(
@@ -304,7 +353,7 @@ class GovernanceDecisionRepositoryIntegrationTest {
                         POLICY_VERSION_ID,
                         POLICY_RULE_ID,
                         DecisionOutcome.REQUIRE_APPROVAL,
-                        new RiskScore(95),
+                        new RiskScore(90),
                         List.of(
                                 new DecisionReasonCode(
                                         "HIGH_RISK_REFUND"
@@ -350,7 +399,7 @@ class GovernanceDecisionRepositoryIntegrationTest {
                         POLICY_VERSION_ID,
                         null,
                         DecisionOutcome.DENY,
-                        new RiskScore(20),
+                        new RiskScore(90),
                         List.of(
                                 new DecisionReasonCode(
                                         "NO_APPLICABLE_POLICY_RULE"
@@ -472,7 +521,9 @@ class GovernanceDecisionRepositoryIntegrationTest {
                 );
 
         assertThat(count)
-                .isEqualTo(1);
+                .isEqualTo(
+                        1
+                );
     }
 
     private GovernanceDecision matchedDecision(
