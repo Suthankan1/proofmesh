@@ -2,6 +2,7 @@ package com.proofmesh.controlplane.approval.internal;
 
 import com.proofmesh.controlplane.approval.ApprovalRequest;
 import com.proofmesh.controlplane.approval.ApprovalRequestCreator;
+import com.proofmesh.controlplane.approval.ApprovalState;
 import com.proofmesh.controlplane.decision.GovernanceDecision;
 import com.proofmesh.controlplane.governedaction.GovernedAction;
 
@@ -81,16 +82,17 @@ class DefaultApprovalRequestCreator
         }
 
         return new ApprovalRequest(
-                approvalRequestId,
-                governedAction.organizationId(),
-                governedAction.id(),
-                governanceDecision.id(),
-                governedAction.agentId(),
-                governedAction.toolName(),
-                governedAction.operationName(),
-                governedAction.requestPayloadHash(),
-                requestedAt,
-                expiresAt
-        );
-    }
+            approvalRequestId,
+            governedAction.organizationId(),
+            governedAction.id(),
+            governanceDecision.id(),
+            governedAction.agentId(),
+            governedAction.toolName(),
+            governedAction.operationName(),
+            governedAction.requestPayloadHash(),
+            requestedAt,
+            expiresAt,
+            new ApprovalState.Pending()
+    );
+        }
 }

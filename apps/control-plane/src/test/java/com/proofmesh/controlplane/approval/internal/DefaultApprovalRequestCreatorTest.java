@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.proofmesh.controlplane.approval.ApprovalRequest;
 import com.proofmesh.controlplane.approval.ApprovalRequestCreator;
+import com.proofmesh.controlplane.approval.ApprovalStatus;
 import com.proofmesh.controlplane.decision.DecisionOutcome;
 import com.proofmesh.controlplane.decision.DecisionReasonCode;
 import com.proofmesh.controlplane.decision.GovernanceDecision;
@@ -17,6 +18,7 @@ import com.proofmesh.controlplane.governedaction.RequestPayloadHash;
 import com.proofmesh.controlplane.governedaction.ToolName;
 import com.proofmesh.controlplane.policy.PolicyRuleId;
 import com.proofmesh.controlplane.policy.PolicyVersionId;
+import com.proofmesh.controlplane.approval.ApprovalStatus;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -191,6 +193,12 @@ class DefaultApprovalRequestCreatorTest {
                 approvalRequest.expiresAt()
         ).isEqualTo(
                 EXPIRES_AT
+        );
+
+        assertThat(
+                approvalRequest.status()
+        ).isEqualTo(
+                ApprovalStatus.PENDING
         );
     }
 
