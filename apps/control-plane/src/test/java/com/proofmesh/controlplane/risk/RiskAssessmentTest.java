@@ -200,4 +200,96 @@ class RiskAssessmentTest {
                 "Tool operation carries baseline runtime risk."
         );
     }
+
+    @Test
+    void sameAssessmentSemanticsIgnoreIdentityAndAssessmentTime() {
+        RiskAssessment first =
+                new RiskAssessment(
+                        UUID.randomUUID(),
+                        UUID.fromString(
+                                "52000000-0000-0000-0000-000000000001"
+                        ),
+                        UUID.fromString(
+                                "53000000-0000-0000-0000-000000000001"
+                        ),
+                        new RiskLogicVersion(
+                                "deterministic-v1"
+                        ),
+                        new RiskScore(
+                                30
+                        ),
+                        List.of(
+                                signal(
+                                        BASELINE_CODE
+                                )
+                        ),
+                        ASSESSED_AT
+                );
+
+        RiskAssessment second =
+                new RiskAssessment(
+                        UUID.randomUUID(),
+                        first.organizationId(),
+                        first.governedActionId(),
+                        first.logicVersion(),
+                        first.riskScore(),
+                        first.signals(),
+                        ASSESSED_AT.plusSeconds(30)
+                );
+
+        assertThat(
+                first.hasSameAssessmentSemanticsAs(
+                        second
+                )
+        ).isTrue();
+    }
+
+    @Test
+    void differentRiskScoreChangesAssessmentSemantics() {
+        RiskAssessment first =
+                assessment(
+                        List.of(
+                                signal(
+                                        BASELINE_CODE
+                                )
+                        )
+                );
+
+        RiskAssessment second =
+                new RiskAssessment(
+                        UUID.randomUUID(),
+                        first.organizationId(),
+                        first.governedActionId(),
+                        first.logicVersion(),
+                        new RiskScore(
+                                31
+                        ),
+                        first.signals(),
+                        first.assessedAt()
+                );
+
+        assertThat(
+                first.hasSameAssessmentSemanticsAs(
+                        second
+                )
+        ).isFalse();
+    }
+
+    @Test
+    void nullAssessmentNeverHasSameSemantics() {
+        RiskAssessment assessment =
+                assessment(
+                        List.of(
+                                signal(
+                                        BASELINE_CODE
+                                )
+                        )
+                );
+
+        assertThat(
+                assessment.hasSameAssessmentSemanticsAs(
+                        null
+                )
+        ).isFalse();
+    }
 }

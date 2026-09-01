@@ -88,4 +88,28 @@ public record RiskAssessment(
                         signals
                 );
     }
+
+    public boolean hasSameAssessmentSemanticsAs(
+            RiskAssessment other
+    ) {
+        if (other == null) {
+            return false;
+        }
+
+        return organizationId.equals(
+                other.organizationId
+        )
+                && governedActionId.equals(
+                        other.governedActionId
+                )
+                && logicVersion.equals(
+                        other.logicVersion
+                )
+                && riskScore.equals(
+                        other.riskScore
+                )
+                && signals.equals(
+                        other.signals
+                );
+    }
 }
