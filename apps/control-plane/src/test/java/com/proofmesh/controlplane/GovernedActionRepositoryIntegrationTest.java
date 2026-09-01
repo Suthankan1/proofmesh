@@ -21,45 +21,19 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import java.time.Instant;
-import java.util.Optional;
-import java.util.UUID;
-
 @SpringBootTest
 @Import(TestcontainersConfiguration.class)
 class GovernedActionRepositoryIntegrationTest {
-
-    private static final UUID ORGANIZATION_ID =
-            UUID.fromString(
-                    "d0000000-0000-0000-0000-000000000001"
-            );
-
-    private static final UUID OTHER_ORGANIZATION_ID =
-            UUID.fromString(
-                    "d0000000-0000-0000-0000-000000000002"
-            );
-
-    private static final UUID AGENT_ID =
-            UUID.fromString(
-                    "e0000000-0000-0000-0000-000000000001"
-            );
-
-    private static final UUID ACTION_ID =
-            UUID.fromString(
-                    "f0000000-0000-0000-0000-000000000001"
-            );
-
-    private static final UUID SECOND_ACTION_ID =
-            UUID.fromString(
-                    "f0000000-0000-0000-0000-000000000002"
-            );
 
     private static final Instant CREATED_AT =
             Instant.parse(
@@ -75,27 +49,28 @@ class GovernedActionRepositoryIntegrationTest {
     @Autowired
     JdbcTemplate jdbcTemplate;
 
+    private UUID organizationId;
+    private UUID otherOrganizationId;
+    private UUID agentId;
+    private UUID actionId;
+    private UUID secondActionId;
+
     @BeforeEach
     void setUp() {
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.governed_actions"
-        );
+        organizationId =
+                UUID.randomUUID();
 
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.agents"
-        );
+        otherOrganizationId =
+                UUID.randomUUID();
 
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.organization_memberships"
-        );
+        agentId =
+                UUID.randomUUID();
 
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.operator_users"
-        );
+        actionId =
+                UUID.randomUUID();
 
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.organizations"
-        );
+        secondActionId =
+                UUID.randomUUID();
 
         jdbcTemplate.update(
                 """
@@ -107,8 +82,8 @@ class GovernedActionRepositoryIntegrationTest {
                 )
                 VALUES (?, ?, ?, ?)
                 """,
-                ORGANIZATION_ID,
-                "governed-action-primary",
+                organizationId,
+                "ga-" + organizationId,
                 "Governed Action Primary",
                 "ACTIVE"
         );
@@ -123,8 +98,8 @@ class GovernedActionRepositoryIntegrationTest {
                 )
                 VALUES (?, ?, ?, ?)
                 """,
-                OTHER_ORGANIZATION_ID,
-                "governed-action-other",
+                otherOrganizationId,
+                "ga-other-" + otherOrganizationId,
                 "Governed Action Other",
                 "ACTIVE"
         );
@@ -139,8 +114,8 @@ class GovernedActionRepositoryIntegrationTest {
                 )
                 VALUES (?, ?, ?, ?)
                 """,
-                AGENT_ID,
-                ORGANIZATION_ID,
+                agentId,
+                organizationId,
                 "Finance Refund Agent",
                 "ACTIVE"
         );
@@ -161,7 +136,7 @@ class GovernedActionRepositoryIntegrationTest {
 
         GovernedAction action =
                 createAction(
-                        ACTION_ID,
+                        actionId,
                         payload,
                         "request-001"
                 );
@@ -182,8 +157,8 @@ class GovernedActionRepositoryIntegrationTest {
         Optional<GovernedAction> result =
                 governedActionRepository
                         .findByIdAndOrganizationId(
-                                ACTION_ID,
-                                ORGANIZATION_ID
+                                actionId,
+                                organizationId
                         );
 
         assertThat(result)
@@ -197,11 +172,13 @@ class GovernedActionRepositoryIntegrationTest {
                         WHERE id = ?
                         """,
                         String.class,
-                        ACTION_ID
+                        actionId
                 );
 
         assertThat(databaseType)
-                .isEqualTo("jsonb");
+                .isEqualTo(
+                        "jsonb"
+                );
 
         String paymentId =
                 jdbcTemplate.queryForObject(
@@ -211,11 +188,13 @@ class GovernedActionRepositoryIntegrationTest {
                         WHERE id = ?
                         """,
                         String.class,
-                        ACTION_ID
+                        actionId
                 );
 
         assertThat(paymentId)
-                .isEqualTo("pay_123");
+                .isEqualTo(
+                        "pay_123"
+                );
 
         String storedHash =
                 jdbcTemplate.queryForObject(
@@ -225,7 +204,7 @@ class GovernedActionRepositoryIntegrationTest {
                         WHERE id = ?
                         """,
                         String.class,
-                        ACTION_ID
+                        actionId
                 );
 
         assertThat(storedHash)
@@ -241,14 +220,14 @@ class GovernedActionRepositoryIntegrationTest {
 
         GovernedAction firstAction =
                 createAction(
-                        ACTION_ID,
+                        actionId,
                         payload,
                         "request-002"
                 );
 
         GovernedAction secondCandidate =
                 createAction(
-                        SECOND_ACTION_ID,
+                        secondActionId,
                         payload,
                         "request-002"
                 );
@@ -289,20 +268,22 @@ class GovernedActionRepositoryIntegrationTest {
                           AND idempotency_key = ?
                         """,
                         Integer.class,
-                        ORGANIZATION_ID,
-                        AGENT_ID,
+                        organizationId,
+                        agentId,
                         "request-002"
                 );
 
         assertThat(rowCount)
-                .isEqualTo(1);
+                .isEqualTo(
+                        1
+                );
     }
 
     @Test
     void doesNotLoadActionFromDifferentOrganization() {
         GovernedAction action =
                 createAction(
-                        ACTION_ID,
+                        actionId,
                         canonicalPayload(),
                         "request-003"
                 );
@@ -322,8 +303,8 @@ class GovernedActionRepositoryIntegrationTest {
         Optional<GovernedAction> result =
                 governedActionRepository
                         .findByIdAndOrganizationId(
-                                ACTION_ID,
-                                OTHER_ORGANIZATION_ID
+                                actionId,
+                                otherOrganizationId
                         );
 
         assertThat(result)
@@ -339,9 +320,9 @@ class GovernedActionRepositoryIntegrationTest {
 
         GovernedAction action =
                 new GovernedAction(
-                        ACTION_ID,
-                        ORGANIZATION_ID,
-                        AGENT_ID,
+                        actionId,
+                        organizationId,
+                        agentId,
                         idempotencyKey,
                         new ToolName(
                                 "stripe"
@@ -368,8 +349,8 @@ class GovernedActionRepositoryIntegrationTest {
         Optional<GovernedAction> result =
                 governedActionRepository
                         .findByOrganizationIdAndAgentIdAndIdempotencyKey(
-                                ORGANIZATION_ID,
-                                AGENT_ID,
+                                organizationId,
+                                agentId,
                                 idempotencyKey
                         );
 
@@ -381,7 +362,7 @@ class GovernedActionRepositoryIntegrationTest {
     void failsClosedWhenPersistedPayloadDoesNotMatchStoredHash() {
         GovernedAction action =
                 createAction(
-                        ACTION_ID,
+                        actionId,
                         canonicalPayload(),
                         "request-005"
                 );
@@ -411,14 +392,14 @@ class GovernedActionRepositoryIntegrationTest {
                   "amount": 999999
                 }
                 """,
-                ACTION_ID
+                actionId
         );
 
         assertThatThrownBy(
                 () -> governedActionRepository
                         .findByIdAndOrganizationId(
-                                ACTION_ID,
-                                ORGANIZATION_ID
+                                actionId,
+                                organizationId
                         )
         )
                 .isInstanceOf(
@@ -427,6 +408,252 @@ class GovernedActionRepositoryIntegrationTest {
                 .hasMessageContaining(
                         "stored hash"
                 );
+    }
+
+    @Test
+    void concurrentInsertsProduceSingleIdempotencyWinner()
+            throws Exception {
+
+        CanonicalRequestPayload payload =
+                canonicalPayload();
+
+        IdempotencyKey idempotencyKey =
+                new IdempotencyKey(
+                        "request-concurrent-001"
+                );
+
+        GovernedAction firstCandidate =
+                new GovernedAction(
+                        actionId,
+                        organizationId,
+                        agentId,
+                        idempotencyKey,
+                        new ToolName(
+                                "stripe"
+                        ),
+                        new OperationName(
+                                "refund_payment"
+                        ),
+                        payload,
+                        CREATED_AT
+                );
+
+        GovernedAction secondCandidate =
+                new GovernedAction(
+                        secondActionId,
+                        organizationId,
+                        agentId,
+                        idempotencyKey,
+                        new ToolName(
+                                "stripe"
+                        ),
+                        new OperationName(
+                                "refund_payment"
+                        ),
+                        payload,
+                        CREATED_AT
+                );
+
+        CountDownLatch ready =
+                new CountDownLatch(
+                        2
+                );
+
+        CountDownLatch start =
+                new CountDownLatch(
+                        1
+                );
+
+        ExecutorService executor =
+                Executors.newFixedThreadPool(
+                        2
+                );
+
+        try {
+            Future<GovernedActionInsertResult> firstFuture =
+                    executor.submit(
+                            () -> {
+                                ready.countDown();
+
+                                if (!start.await(
+                                        5,
+                                        TimeUnit.SECONDS
+                                )) {
+                                    throw new IllegalStateException(
+                                            "Timed out waiting to start first concurrent insert"
+                                    );
+                                }
+
+                                return governedActionRepository
+                                        .insertIfAbsent(
+                                                firstCandidate
+                                        );
+                            }
+                    );
+
+            Future<GovernedActionInsertResult> secondFuture =
+                    executor.submit(
+                            () -> {
+                                ready.countDown();
+
+                                if (!start.await(
+                                        5,
+                                        TimeUnit.SECONDS
+                                )) {
+                                    throw new IllegalStateException(
+                                            "Timed out waiting to start second concurrent insert"
+                                    );
+                                }
+
+                                return governedActionRepository
+                                        .insertIfAbsent(
+                                                secondCandidate
+                                        );
+                            }
+                    );
+
+            assertThat(
+                    ready.await(
+                            5,
+                            TimeUnit.SECONDS
+                    )
+            ).isTrue();
+
+            start.countDown();
+
+            GovernedActionInsertResult firstResult =
+                    firstFuture.get(
+                            10,
+                            TimeUnit.SECONDS
+                    );
+
+            GovernedActionInsertResult secondResult =
+                    secondFuture.get(
+                            10,
+                            TimeUnit.SECONDS
+                    );
+
+            List<GovernedActionInsertResult> results =
+                    List.of(
+                            firstResult,
+                            secondResult
+                    );
+
+            long insertedCount =
+                    results.stream()
+                            .filter(
+                                    GovernedActionInsertResult
+                                            .Inserted.class
+                                            ::isInstance
+                            )
+                            .count();
+
+            long existingCount =
+                    results.stream()
+                            .filter(
+                                    GovernedActionInsertResult
+                                            .Existing.class
+                                            ::isInstance
+                            )
+                            .count();
+
+            assertThat(insertedCount)
+                    .isEqualTo(
+                            1
+                    );
+
+            assertThat(existingCount)
+                    .isEqualTo(
+                            1
+                    );
+
+            GovernedAction insertedAction =
+                    results.stream()
+                            .filter(
+                                    GovernedActionInsertResult
+                                            .Inserted.class
+                                            ::isInstance
+                            )
+                            .map(
+                                    GovernedActionInsertResult
+                                            .Inserted.class
+                                            ::cast
+                            )
+                            .map(
+                                    GovernedActionInsertResult
+                                            .Inserted
+                                            ::governedAction
+                            )
+                            .findFirst()
+                            .orElseThrow();
+
+            GovernedAction existingAction =
+                    results.stream()
+                            .filter(
+                                    GovernedActionInsertResult
+                                            .Existing.class
+                                            ::isInstance
+                            )
+                            .map(
+                                    GovernedActionInsertResult
+                                            .Existing.class
+                                            ::cast
+                            )
+                            .map(
+                                    GovernedActionInsertResult
+                                            .Existing
+                                            ::governedAction
+                            )
+                            .findFirst()
+                            .orElseThrow();
+
+            assertThat(existingAction)
+                    .isEqualTo(
+                            insertedAction
+                    );
+
+            Long rowCount =
+                    jdbcTemplate.queryForObject(
+                            """
+                            SELECT COUNT(*)
+                            FROM proofmesh.governed_actions
+                            WHERE organization_id = ?
+                              AND agent_id = ?
+                              AND idempotency_key = ?
+                            """,
+                            Long.class,
+                            organizationId,
+                            agentId,
+                            idempotencyKey.value()
+                    );
+
+            assertThat(rowCount)
+                    .isEqualTo(
+                            1L
+                    );
+
+            UUID storedActionId =
+                    jdbcTemplate.queryForObject(
+                            """
+                            SELECT id
+                            FROM proofmesh.governed_actions
+                            WHERE organization_id = ?
+                              AND agent_id = ?
+                              AND idempotency_key = ?
+                            """,
+                            UUID.class,
+                            organizationId,
+                            agentId,
+                            idempotencyKey.value()
+                    );
+
+            assertThat(storedActionId)
+                    .isEqualTo(
+                            insertedAction.id()
+                    );
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     private CanonicalRequestPayload canonicalPayload() {
@@ -448,8 +675,8 @@ class GovernedActionRepositoryIntegrationTest {
     ) {
         return new GovernedAction(
                 actionId,
-                ORGANIZATION_ID,
-                AGENT_ID,
+                organizationId,
+                agentId,
                 new IdempotencyKey(
                         idempotencyKey
                 ),
@@ -463,240 +690,4 @@ class GovernedActionRepositoryIntegrationTest {
                 CREATED_AT
         );
     }
-
-    @Test
-void concurrentInsertsProduceSingleIdempotencyWinner()
-        throws Exception {
-
-    CanonicalRequestPayload payload =
-            canonicalPayload();
-
-    IdempotencyKey idempotencyKey =
-            new IdempotencyKey(
-                    "request-concurrent-001"
-            );
-
-    GovernedAction firstCandidate =
-            new GovernedAction(
-                    ACTION_ID,
-                    ORGANIZATION_ID,
-                    AGENT_ID,
-                    idempotencyKey,
-                    new ToolName(
-                            "stripe"
-                    ),
-                    new OperationName(
-                            "refund_payment"
-                    ),
-                    payload,
-                    CREATED_AT
-            );
-
-    GovernedAction secondCandidate =
-            new GovernedAction(
-                    SECOND_ACTION_ID,
-                    ORGANIZATION_ID,
-                    AGENT_ID,
-                    idempotencyKey,
-                    new ToolName(
-                            "stripe"
-                    ),
-                    new OperationName(
-                            "refund_payment"
-                    ),
-                    payload,
-                    CREATED_AT
-            );
-
-    CountDownLatch ready =
-            new CountDownLatch(2);
-
-    CountDownLatch start =
-            new CountDownLatch(1);
-
-    ExecutorService executor =
-            Executors.newFixedThreadPool(2);
-
-    try {
-        Future<GovernedActionInsertResult>
-        firstFuture =
-                executor.submit(
-                        () -> {
-                            ready.countDown();
-
-                            if (!start.await(
-                                    5,
-                                    TimeUnit.SECONDS
-                            )) {
-                                throw new IllegalStateException(
-                                        "Timed out waiting to start first concurrent insert"
-                                );
-                            }
-
-                            return governedActionRepository
-                                    .insertIfAbsent(
-                                            firstCandidate
-                                    );
-                        }
-                );
-
-        Future<GovernedActionInsertResult>
-        secondFuture =
-                executor.submit(
-                        () -> {
-                            ready.countDown();
-
-                            if (!start.await(
-                                    5,
-                                    TimeUnit.SECONDS
-                            )) {
-                                throw new IllegalStateException(
-                                        "Timed out waiting to start second concurrent insert"
-                                );
-                            }
-
-                            return governedActionRepository
-                                    .insertIfAbsent(
-                                            secondCandidate
-                                    );
-                        }
-                );
-
-        assertThat(
-                ready.await(
-                        5,
-                        TimeUnit.SECONDS
-                )
-        ).isTrue();
-
-        start.countDown();
-
-        GovernedActionInsertResult firstResult =
-                firstFuture.get(
-                        10,
-                        TimeUnit.SECONDS
-                );
-
-        GovernedActionInsertResult secondResult =
-                secondFuture.get(
-                        10,
-                        TimeUnit.SECONDS
-                );
-
-        List<GovernedActionInsertResult> results =
-                List.of(
-                        firstResult,
-                        secondResult
-                );
-
-        long insertedCount =
-                results.stream()
-                        .filter(
-                                GovernedActionInsertResult
-                                        .Inserted.class
-                                        ::isInstance
-                        )
-                        .count();
-
-        long existingCount =
-                results.stream()
-                        .filter(
-                                GovernedActionInsertResult
-                                        .Existing.class
-                                        ::isInstance
-                        )
-                        .count();
-
-        assertThat(insertedCount)
-                .isEqualTo(1);
-
-        assertThat(existingCount)
-                .isEqualTo(1);
-
-        GovernedAction insertedAction =
-                results.stream()
-                        .filter(
-                                GovernedActionInsertResult
-                                        .Inserted.class
-                                        ::isInstance
-                        )
-                        .map(
-                                GovernedActionInsertResult
-                                        .Inserted.class
-                                        ::cast
-                        )
-                        .map(
-                                GovernedActionInsertResult
-                                        .Inserted
-                                        ::governedAction
-                        )
-                        .findFirst()
-                        .orElseThrow();
-
-        GovernedAction existingAction =
-                results.stream()
-                        .filter(
-                                GovernedActionInsertResult
-                                        .Existing.class
-                                        ::isInstance
-                        )
-                        .map(
-                                GovernedActionInsertResult
-                                        .Existing.class
-                                        ::cast
-                        )
-                        .map(
-                                GovernedActionInsertResult
-                                        .Existing
-                                        ::governedAction
-                        )
-                        .findFirst()
-                        .orElseThrow();
-
-        assertThat(existingAction)
-                .isEqualTo(
-                        insertedAction
-                );
-
-        Long rowCount =
-                jdbcTemplate.queryForObject(
-                        """
-                        SELECT COUNT(*)
-                        FROM proofmesh.governed_actions
-                        WHERE organization_id = ?
-                          AND agent_id = ?
-                          AND idempotency_key = ?
-                        """,
-                        Long.class,
-                        ORGANIZATION_ID,
-                        AGENT_ID,
-                        idempotencyKey.value()
-                );
-
-        assertThat(rowCount)
-                .isEqualTo(1L);
-
-        UUID storedActionId =
-                jdbcTemplate.queryForObject(
-                        """
-                        SELECT id
-                        FROM proofmesh.governed_actions
-                        WHERE organization_id = ?
-                          AND agent_id = ?
-                          AND idempotency_key = ?
-                        """,
-                        UUID.class,
-                        ORGANIZATION_ID,
-                        AGENT_ID,
-                        idempotencyKey.value()
-                );
-
-        assertThat(storedActionId)
-                .isEqualTo(
-                        insertedAction.id()
-                );
-    } finally {
-        executor.shutdownNow();
-    }
-}
 }
