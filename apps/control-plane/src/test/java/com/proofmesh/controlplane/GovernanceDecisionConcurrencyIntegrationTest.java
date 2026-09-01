@@ -146,7 +146,9 @@ class GovernanceDecisionConcurrencyIntegrationTest {
 
             assertThat(
                     countDecisionsForAction()
-            ).isEqualTo(1);
+            ).isEqualTo(
+                    1
+            );
 
             UUID persistedDecisionId =
                     jdbcTemplate.queryForObject(
@@ -179,14 +181,14 @@ class GovernanceDecisionConcurrencyIntegrationTest {
         CountDownLatch start =
                 new CountDownLatch(1);
 
-        PolicyEvaluationResult approval =
+        PolicyEvaluationResult firstEvaluation =
                 approvalEvaluation(
                         90
                 );
 
-        PolicyEvaluationResult deny =
-                denyEvaluation(
-                        90
+        PolicyEvaluationResult secondEvaluation =
+                approvalEvaluation(
+                        80
                 );
 
         try (ExecutorService executor =
@@ -196,7 +198,7 @@ class GovernanceDecisionConcurrencyIntegrationTest {
                     executor.submit(
                             observingTask(
                                     UUID.randomUUID(),
-                                    approval,
+                                    firstEvaluation,
                                     Instant.parse(
                                             "2026-09-01T06:10:00Z"
                                     ),
@@ -209,7 +211,7 @@ class GovernanceDecisionConcurrencyIntegrationTest {
                     executor.submit(
                             observingTask(
                                     UUID.randomUUID(),
-                                    deny,
+                                    secondEvaluation,
                                     Instant.parse(
                                             "2026-09-01T06:10:01Z"
                                     ),
@@ -251,15 +253,21 @@ class GovernanceDecisionConcurrencyIntegrationTest {
 
             assertThat(
                     successCount
-            ).isEqualTo(1);
+            ).isEqualTo(
+                    1
+            );
 
             assertThat(
                     conflictCount
-            ).isEqualTo(1);
+            ).isEqualTo(
+                    1
+            );
 
             assertThat(
                     countDecisionsForAction()
-            ).isEqualTo(1);
+            ).isEqualTo(
+                    1
+            );
 
             GovernanceDecision winner =
                     List.of(
@@ -276,24 +284,24 @@ class GovernanceDecisionConcurrencyIntegrationTest {
                             .findFirst()
                             .orElseThrow();
 
-            String persistedOutcome =
+            Integer persistedRiskScore =
                     jdbcTemplate.queryForObject(
                             """
-                            SELECT outcome
+                            SELECT risk_score
                             FROM proofmesh.governance_decisions
                             WHERE organization_id = ?
                               AND governed_action_id = ?
                             """,
-                            String.class,
+                            Integer.class,
                             organizationId,
                             actionId
                     );
 
             assertThat(
-                    persistedOutcome
+                    persistedRiskScore
             ).isEqualTo(
-                    winner.outcome()
-                            .name()
+                    winner.riskScore()
+                            .value()
             );
         }
     }
@@ -358,24 +366,6 @@ class GovernanceDecisionConcurrencyIntegrationTest {
                 policyVersionId,
                 policyRuleId,
                 DecisionOutcome.REQUIRE_APPROVAL,
-                new RiskScore(
-                        riskScore
-                ),
-                List.of(
-                        new DecisionReasonCode(
-                                "HIGH_RISK_REFUND"
-                        )
-                )
-        );
-    }
-
-    private PolicyEvaluationResult denyEvaluation(
-            int riskScore
-    ) {
-        return new PolicyEvaluationResult.Matched(
-                policyVersionId,
-                policyRuleId,
-                DecisionOutcome.DENY,
                 new RiskScore(
                         riskScore
                 ),

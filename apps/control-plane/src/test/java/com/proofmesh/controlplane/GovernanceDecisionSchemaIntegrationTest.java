@@ -81,6 +81,16 @@ class GovernanceDecisionSchemaIntegrationTest {
                     "b6000000-0000-0000-0000-000000000001"
             );
 
+    private static final UUID ALLOW_POLICY_RULE_ID =
+            UUID.fromString(
+                    "b6000000-0000-0000-0000-000000000002"
+            );
+
+    private static final UUID DENY_POLICY_RULE_ID =
+            UUID.fromString(
+                    "b6000000-0000-0000-0000-000000000003"
+            );
+
     private static final UUID UNKNOWN_POLICY_RULE_ID =
             UUID.fromString(
                     "b6000000-0000-0000-0000-000000000099"
@@ -255,7 +265,9 @@ class GovernanceDecisionSchemaIntegrationTest {
                 );
 
         assertThat(riskScore)
-                .isEqualTo(90);
+                .isEqualTo(
+                        90
+                );
 
         assertThat(policyVersionId)
                 .isEqualTo(
@@ -308,12 +320,12 @@ class GovernanceDecisionSchemaIntegrationTest {
                         ORGANIZATION_ID,
                         OTHER_ACTION_ID,
                         POLICY_VERSION_ID,
-                        POLICY_RULE_ID,
+                        DENY_POLICY_RULE_ID,
                         "DENY",
                         80,
                         """
                         [
-                          "HIGH_RISK_REFUND"
+                          "REFUND_BLOCKED"
                         ]
                         """
                 )
@@ -331,12 +343,12 @@ class GovernanceDecisionSchemaIntegrationTest {
                         ORGANIZATION_ID,
                         ACTION_ID,
                         OTHER_POLICY_VERSION_ID,
-                        POLICY_RULE_ID,
+                        DENY_POLICY_RULE_ID,
                         "DENY",
                         80,
                         """
                         [
-                          "HIGH_RISK_REFUND"
+                          "REFUND_BLOCKED"
                         ]
                         """
                 )
@@ -354,7 +366,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                         ORGANIZATION_ID,
                         ACTION_ID,
                         DRAFT_POLICY_VERSION_ID,
-                        POLICY_RULE_ID,
+                        ALLOW_POLICY_RULE_ID,
                         "ALLOW",
                         10,
                         """
@@ -452,8 +464,8 @@ class GovernanceDecisionSchemaIntegrationTest {
                         ORGANIZATION_ID,
                         ACTION_ID,
                         POLICY_VERSION_ID,
-                        POLICY_RULE_ID,
-                        "ALLOW",
+                        null,
+                        "DENY",
                         10,
                         """
                         []
@@ -473,13 +485,13 @@ class GovernanceDecisionSchemaIntegrationTest {
                         ORGANIZATION_ID,
                         ACTION_ID,
                         POLICY_VERSION_ID,
-                        POLICY_RULE_ID,
-                        "ALLOW",
+                        null,
+                        "DENY",
                         10,
                         """
                         [
-                          "STANDARD_REFUND",
-                          "STANDARD_REFUND"
+                          "NO_APPLICABLE_POLICY_RULE",
+                          "NO_APPLICABLE_POLICY_RULE"
                         ]
                         """
                 )
@@ -497,8 +509,8 @@ class GovernanceDecisionSchemaIntegrationTest {
                         ORGANIZATION_ID,
                         ACTION_ID,
                         POLICY_VERSION_ID,
-                        POLICY_RULE_ID,
-                        "ALLOW",
+                        null,
+                        "DENY",
                         10,
                         """
                         [
@@ -519,7 +531,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                 ORGANIZATION_ID,
                 ACTION_ID,
                 POLICY_VERSION_ID,
-                POLICY_RULE_ID,
+                ALLOW_POLICY_RULE_ID,
                 "ALLOW",
                 10,
                 """
@@ -535,7 +547,7 @@ class GovernanceDecisionSchemaIntegrationTest {
                         ORGANIZATION_ID,
                         ACTION_ID,
                         POLICY_VERSION_ID,
-                        POLICY_RULE_ID,
+                        ALLOW_POLICY_RULE_ID,
                         "ALLOW",
                         10,
                         """
@@ -551,18 +563,108 @@ class GovernanceDecisionSchemaIntegrationTest {
     }
 
     @Test
-    void rejectsModificationOfPersistedDecision() {
+    void rejectsOutcomeThatDoesNotMatchMatchedRuleEffect() {
+        assertThatThrownBy(
+                () -> insertDecision(
+                        DECISION_ID,
+                        ORGANIZATION_ID,
+                        ACTION_ID,
+                        POLICY_VERSION_ID,
+                        POLICY_RULE_ID,
+                        "ALLOW",
+                        90,
+                        """
+                        [
+                          "HIGH_RISK_REFUND"
+                        ]
+                        """
+                )
+        )
+                .isInstanceOf(
+                        DataIntegrityViolationException.class
+                )
+                .hasMessageContaining(
+                        "outcome does not match"
+                );
+    }
+
+    @Test
+    void rejectsDecisionMissingMatchedRuleReasonCode() {
+        assertThatThrownBy(
+                () -> insertDecision(
+                        DECISION_ID,
+                        ORGANIZATION_ID,
+                        ACTION_ID,
+                        POLICY_VERSION_ID,
+                        POLICY_RULE_ID,
+                        "REQUIRE_APPROVAL",
+                        90,
+                        """
+                        [
+                          "RUNTIME_CONTEXT_VERIFIED"
+                        ]
+                        """
+                )
+        )
+                .isInstanceOf(
+                        DataIntegrityViolationException.class
+                )
+                .hasMessageContaining(
+                        "must include the matched policy rule reason code"
+                );
+    }
+
+    @Test
+    void acceptsSupplementalReasonsWhenMatchedRuleReasonIsPresent() {
         insertDecision(
                 DECISION_ID,
                 ORGANIZATION_ID,
                 ACTION_ID,
                 POLICY_VERSION_ID,
                 POLICY_RULE_ID,
+                "REQUIRE_APPROVAL",
+                90,
+                """
+                [
+                  "HIGH_RISK_REFUND",
+                  "RUNTIME_CONTEXT_VERIFIED"
+                ]
+                """
+        );
+
+        String reasonCodes =
+                jdbcTemplate.queryForObject(
+                        """
+                        SELECT reason_codes::TEXT
+                        FROM proofmesh.governance_decisions
+                        WHERE id = ?
+                        """,
+                        String.class,
+                        DECISION_ID
+                );
+
+        assertThat(reasonCodes)
+                .contains(
+                        "HIGH_RISK_REFUND"
+                )
+                .contains(
+                        "RUNTIME_CONTEXT_VERIFIED"
+                );
+    }
+
+    @Test
+    void rejectsModificationOfPersistedDecision() {
+        insertDecision(
+                DECISION_ID,
+                ORGANIZATION_ID,
+                ACTION_ID,
+                POLICY_VERSION_ID,
+                DENY_POLICY_RULE_ID,
                 "DENY",
                 90,
                 """
                 [
-                  "HIGH_RISK_REFUND"
+                  "REFUND_BLOCKED"
                 ]
                 """
         );
@@ -592,12 +694,12 @@ class GovernanceDecisionSchemaIntegrationTest {
                 ORGANIZATION_ID,
                 ACTION_ID,
                 POLICY_VERSION_ID,
-                POLICY_RULE_ID,
+                DENY_POLICY_RULE_ID,
                 "DENY",
                 90,
                 """
                 [
-                  "HIGH_RISK_REFUND"
+                  "REFUND_BLOCKED"
                 ]
                 """
         );
@@ -870,10 +972,36 @@ class GovernanceDecisionSchemaIntegrationTest {
                         "operation": "refund_payment"
                       },
                       "risk": {
+                        "minimum": 80
+                      },
+                      "effect": "REQUIRE_APPROVAL",
+                      "reasonCode": "HIGH_RISK_REFUND"
+                    },
+                    {
+                      "id": "b6000000-0000-0000-0000-000000000002",
+                      "priority": 200,
+                      "target": {
+                        "tool": "stripe",
+                        "operation": "refund_payment"
+                      },
+                      "risk": {
                         "minimum": 0
                       },
                       "effect": "ALLOW",
                       "reasonCode": "STANDARD_REFUND"
+                    },
+                    {
+                      "id": "b6000000-0000-0000-0000-000000000003",
+                      "priority": 300,
+                      "target": {
+                        "tool": "stripe",
+                        "operation": "refund_payment"
+                      },
+                      "risk": {
+                        "minimum": 0
+                      },
+                      "effect": "DENY",
+                      "reasonCode": "REFUND_BLOCKED"
                     }
                   ]
                 }
