@@ -8,12 +8,18 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.proofmesh.controlplane.agent.Agent;
+import com.proofmesh.controlplane.approval.ApprovalRequest;
+import com.proofmesh.controlplane.approval.ApprovalRequestMaterializer;
+import com.proofmesh.controlplane.approval.ApprovalState;
 import com.proofmesh.controlplane.decision.DecisionOutcome;
 import com.proofmesh.controlplane.decision.DecisionReasonCode;
 import com.proofmesh.controlplane.decision.GovernanceDecision;
 import com.proofmesh.controlplane.decision.PolicyEvaluationResult;
 import com.proofmesh.controlplane.decision.RiskScore;
 import com.proofmesh.controlplane.governedaction.GovernedAction;
+import com.proofmesh.controlplane.governedaction.OperationName;
+import com.proofmesh.controlplane.governedaction.RequestPayloadHash;
+import com.proofmesh.controlplane.governedaction.ToolName;
 import com.proofmesh.controlplane.policy.AgentPolicyBinding;
 import com.proofmesh.controlplane.policy.PolicyRuleId;
 import com.proofmesh.controlplane.policy.PolicyVersion;
@@ -32,6 +38,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -63,6 +70,11 @@ class DefaultRuntimeGovernanceOrchestratorTest {
                     "b5000000-0000-0000-0000-000000000001"
             );
 
+    private static final UUID APPROVAL_REQUEST_ID =
+            UUID.fromString(
+                    "b8000000-0000-0000-0000-000000000001"
+            );
+
     private static final PolicyVersionId POLICY_VERSION_ID =
             new PolicyVersionId(
                     UUID.fromString(
@@ -87,6 +99,16 @@ class DefaultRuntimeGovernanceOrchestratorTest {
                     "2026-09-01T12:00:00Z"
             );
 
+    private static final Duration APPROVAL_WINDOW =
+            Duration.ofMinutes(
+                    15
+            );
+
+    private static final Instant APPROVAL_EXPIRES_AT =
+            EVALUATED_AT.plus(
+                    APPROVAL_WINDOW
+            );
+
     private RuntimeGovernanceContextResolver
             contextResolver;
 
@@ -98,6 +120,9 @@ class DefaultRuntimeGovernanceOrchestratorTest {
 
     private RuntimeGovernanceDecisionResolver
             governanceDecisionResolver;
+
+    private ApprovalRequestMaterializer
+            approvalRequestMaterializer;
 
     private RuntimeGovernanceOrchestrator
             orchestrator;
@@ -124,12 +149,18 @@ class DefaultRuntimeGovernanceOrchestratorTest {
                         RuntimeGovernanceDecisionResolver.class
                 );
 
+        approvalRequestMaterializer =
+                mock(
+                        ApprovalRequestMaterializer.class
+                );
+
         orchestrator =
                 new DefaultRuntimeGovernanceOrchestrator(
                         contextResolver,
                         riskAssessmentResolver,
                         policyEvaluationResolver,
-                        governanceDecisionResolver
+                        governanceDecisionResolver,
+                        approvalRequestMaterializer
                 );
     }
 
@@ -149,6 +180,9 @@ class DefaultRuntimeGovernanceOrchestratorTest {
 
         GovernanceDecision decision =
                 matchedDecision();
+
+        ApprovalRequest approvalRequest =
+                approvalRequest();
 
         RuntimeGovernanceContextResolution.Ready contextReady =
                 new RuntimeGovernanceContextResolution.Ready(
@@ -202,6 +236,17 @@ class DefaultRuntimeGovernanceOrchestratorTest {
                 decisionReady
         );
 
+        when(
+                approvalRequestMaterializer.materialize(
+                        request.governedAction(),
+                        decision,
+                        EVALUATED_AT,
+                        APPROVAL_EXPIRES_AT
+                )
+        ).thenReturn(
+                approvalRequest
+        );
+
         RuntimeGovernanceResult result =
                 orchestrator.govern(
                         request
@@ -234,12 +279,19 @@ class DefaultRuntimeGovernanceOrchestratorTest {
                 decision
         );
 
+        assertThat(
+                governed.approvalRequest()
+        ).contains(
+                approvalRequest
+        );
+
         InOrder order =
                 inOrder(
                         contextResolver,
                         riskAssessmentResolver,
                         policyEvaluationResolver,
-                        governanceDecisionResolver
+                        governanceDecisionResolver,
+                        approvalRequestMaterializer
                 );
 
         order.verify(
@@ -269,6 +321,15 @@ class DefaultRuntimeGovernanceOrchestratorTest {
                 request,
                 riskAssessment,
                 evaluationResult
+        );
+
+        order.verify(
+                approvalRequestMaterializer
+        ).materialize(
+                request.governedAction(),
+                decision,
+                EVALUATED_AT,
+                APPROVAL_EXPIRES_AT
         );
     }
 
@@ -305,7 +366,8 @@ class DefaultRuntimeGovernanceOrchestratorTest {
         verifyNoInteractions(
                 riskAssessmentResolver,
                 policyEvaluationResolver,
-                governanceDecisionResolver
+                governanceDecisionResolver,
+                approvalRequestMaterializer
         );
     }
 
@@ -357,7 +419,8 @@ class DefaultRuntimeGovernanceOrchestratorTest {
 
         verifyNoInteractions(
                 policyEvaluationResolver,
-                governanceDecisionResolver
+                governanceDecisionResolver,
+                approvalRequestMaterializer
         );
     }
 
@@ -437,6 +500,10 @@ class DefaultRuntimeGovernanceOrchestratorTest {
                 result,
                 RuntimeGovernanceFailureReason
                         .GOVERNANCE_DECISION_CONFLICT
+        );
+
+        verifyNoInteractions(
+                approvalRequestMaterializer
         );
     }
 
@@ -546,6 +613,14 @@ class DefaultRuntimeGovernanceOrchestratorTest {
         assertThat(
                 governed.decision().deniesExecution()
         ).isTrue();
+
+        assertThat(
+                governed.approvalRequest()
+        ).isEmpty();
+
+        verifyNoInteractions(
+                approvalRequestMaterializer
+        );
     }
 
     @Test
@@ -566,7 +641,8 @@ class DefaultRuntimeGovernanceOrchestratorTest {
                 contextResolver,
                 riskAssessmentResolver,
                 policyEvaluationResolver,
-                governanceDecisionResolver
+                governanceDecisionResolver,
+                approvalRequestMaterializer
         );
     }
 
@@ -726,6 +802,30 @@ class DefaultRuntimeGovernanceOrchestratorTest {
                         )
                 ),
                 EVALUATED_AT
+        );
+    }
+
+    private ApprovalRequest approvalRequest() {
+        return new ApprovalRequest(
+                APPROVAL_REQUEST_ID,
+                ORGANIZATION_ID,
+                ACTION_ID,
+                DECISION_ID,
+                AGENT_ID,
+                new ToolName(
+                        "stripe"
+                ),
+                new OperationName(
+                        "refund_payment"
+                ),
+                new RequestPayloadHash(
+                        "a".repeat(
+                                64
+                        )
+                ),
+                EVALUATED_AT,
+                APPROVAL_EXPIRES_AT,
+                new ApprovalState.Pending()
         );
     }
 

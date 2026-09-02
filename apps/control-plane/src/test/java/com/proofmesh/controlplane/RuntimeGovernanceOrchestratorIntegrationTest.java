@@ -2,6 +2,8 @@ package com.proofmesh.controlplane;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.proofmesh.controlplane.approval.ApprovalRequest;
+import com.proofmesh.controlplane.approval.ApprovalRequestRepository;
 import com.proofmesh.controlplane.decision.DecisionOutcome;
 import com.proofmesh.controlplane.decision.GovernanceDecision;
 import com.proofmesh.controlplane.decision.GovernanceDecisionRepository;
@@ -44,6 +46,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -144,6 +147,11 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
                     "2026-09-01T10:30:00Z"
             );
 
+    private static final Duration APPROVAL_WINDOW =
+            Duration.ofMinutes(
+                    15
+            );
+
     @Autowired
     JdbcTemplate jdbcTemplate;
 
@@ -167,6 +175,9 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
 
     @Autowired
     GovernanceDecisionRepository governanceDecisionRepository;
+
+    @Autowired
+    ApprovalRequestRepository approvalRequestRepository;
 
     @Test
     void unknownAgentFailsClosedBeforeRiskOrDecisionPersistence() {
@@ -379,6 +390,14 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
         ).isEqualTo(
                 persistedRisk.riskScore()
         );
+
+        assertThat(
+                governed.approvalRequest()
+        ).isEmpty();
+
+        assertThat(
+                approvalRowCount()
+        ).isZero();
     }
 
     @Test
@@ -461,6 +480,91 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
                                 ACTION_ID
                         )
         ).isPresent();
+
+        ApprovalRequest approvalRequest =
+                governed
+                        .approvalRequest()
+                        .orElseThrow();
+
+        assertThat(
+                approvalRequest.organizationId()
+        ).isEqualTo(
+                ORGANIZATION_ID
+        );
+
+        assertThat(
+                approvalRequest.governedActionId()
+        ).isEqualTo(
+                ACTION_ID
+        );
+
+        assertThat(
+                approvalRequest.governanceDecisionId()
+        ).isEqualTo(
+                DECISION_ID_1
+        );
+
+        assertThat(
+                approvalRequest.agentId()
+        ).isEqualTo(
+                AGENT_ID
+        );
+
+        assertThat(
+                approvalRequest.toolName()
+        ).isEqualTo(
+                governedAction.toolName()
+        );
+
+        assertThat(
+                approvalRequest.operationName()
+        ).isEqualTo(
+                governedAction.operationName()
+        );
+
+        assertThat(
+                approvalRequest.requestPayloadHash()
+        ).isEqualTo(
+                governedAction.requestPayloadHash()
+        );
+
+        assertThat(
+                approvalRequest.requestedAt()
+        ).isEqualTo(
+                EVALUATED_AT
+        );
+
+        assertThat(
+                approvalRequest.expiresAt()
+        ).isEqualTo(
+                EVALUATED_AT.plus(
+                        APPROVAL_WINDOW
+                )
+        );
+
+        assertThat(
+                approvalRequest.isPending()
+        ).isTrue();
+
+        ApprovalRequest persistedApproval =
+                approvalRequestRepository
+                        .findByOrganizationIdAndGovernanceDecisionId(
+                                ORGANIZATION_ID,
+                                DECISION_ID_1
+                        )
+                        .orElseThrow();
+
+        assertThat(
+                persistedApproval
+        ).isEqualTo(
+                approvalRequest
+        );
+
+        assertThat(
+                approvalRowCount()
+        ).isEqualTo(
+                1L
+        );
     }
 
     @Test
@@ -516,6 +620,16 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
                 (RuntimeGovernanceResult.Governed)
                         secondResult;
 
+        ApprovalRequest firstApproval =
+                first
+                        .approvalRequest()
+                        .orElseThrow();
+
+        ApprovalRequest secondApproval =
+                second
+                        .approvalRequest()
+                        .orElseThrow();
+
         assertThat(
                 first.riskAssessment().id()
         ).isEqualTo(
@@ -560,6 +674,36 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
         ).isTrue();
 
         assertThat(
+                secondApproval.id()
+        ).isEqualTo(
+                firstApproval.id()
+        );
+
+        assertThat(
+                secondApproval.requestedAt()
+        ).isEqualTo(
+                firstApproval.requestedAt()
+        );
+
+        assertThat(
+                secondApproval.expiresAt()
+        ).isEqualTo(
+                firstApproval.expiresAt()
+        );
+
+        assertThat(
+                secondApproval.governanceDecisionId()
+        ).isEqualTo(
+                first.decision().id()
+        );
+
+        assertThat(
+                secondApproval.governanceDecisionId()
+        ).isNotEqualTo(
+                DECISION_ID_2
+        );
+
+        assertThat(
                 riskRowCount()
         ).isEqualTo(
                 1L
@@ -567,6 +711,12 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
 
         assertThat(
                 decisionRowCount()
+        ).isEqualTo(
+                1L
+        );
+
+        assertThat(
+                approvalRowCount()
         ).isEqualTo(
                 1L
         );
@@ -848,6 +998,10 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
                                 ACTION_ID
                         )
         ).isEmpty();
+
+        assertThat(
+                approvalRowCount()
+        ).isZero();
     }
 
     private Long riskRowCount() {
@@ -869,6 +1023,20 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
                 """
                 SELECT COUNT(*)
                 FROM proofmesh.governance_decisions
+                WHERE organization_id = ?
+                  AND governed_action_id = ?
+                """,
+                Long.class,
+                ORGANIZATION_ID,
+                ACTION_ID
+        );
+    }
+
+    private Long approvalRowCount() {
+        return jdbcTemplate.queryForObject(
+                """
+                SELECT COUNT(*)
+                FROM proofmesh.approval_requests
                 WHERE organization_id = ?
                   AND governed_action_id = ?
                 """,

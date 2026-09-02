@@ -1,5 +1,8 @@
 package com.proofmesh.controlplane.runtimegovernance.internal;
 
+import com.proofmesh.controlplane.approval.ApprovalRequest;
+import com.proofmesh.controlplane.approval.ApprovalRequestMaterializer;
+import com.proofmesh.controlplane.decision.GovernanceDecision;
 import com.proofmesh.controlplane.decision.PolicyEvaluationResult;
 import com.proofmesh.controlplane.governedaction.GovernedAction;
 import com.proofmesh.controlplane.risk.RiskAssessment;
@@ -9,11 +12,19 @@ import com.proofmesh.controlplane.runtimegovernance.RuntimeGovernanceResult;
 
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Objects;
+import java.util.Optional;
 
 @Service
 class DefaultRuntimeGovernanceOrchestrator
         implements RuntimeGovernanceOrchestrator {
+
+    private static final Duration DEFAULT_APPROVAL_WINDOW =
+            Duration.ofMinutes(
+                    15
+            );
 
     private final RuntimeGovernanceContextResolver
             contextResolver;
@@ -27,11 +38,15 @@ class DefaultRuntimeGovernanceOrchestrator
     private final RuntimeGovernanceDecisionResolver
             governanceDecisionResolver;
 
+    private final ApprovalRequestMaterializer
+            approvalRequestMaterializer;
+
     DefaultRuntimeGovernanceOrchestrator(
             RuntimeGovernanceContextResolver contextResolver,
             RuntimeRiskAssessmentResolver riskAssessmentResolver,
             RuntimePolicyEvaluationResolver policyEvaluationResolver,
-            RuntimeGovernanceDecisionResolver governanceDecisionResolver
+            RuntimeGovernanceDecisionResolver governanceDecisionResolver,
+            ApprovalRequestMaterializer approvalRequestMaterializer
     ) {
         this.contextResolver =
                 Objects.requireNonNull(
@@ -56,6 +71,12 @@ class DefaultRuntimeGovernanceOrchestrator
                         governanceDecisionResolver,
                         "governanceDecisionResolver must not be null"
                 );
+
+        this.approvalRequestMaterializer =
+                Objects.requireNonNull(
+                        approvalRequestMaterializer,
+                        "approvalRequestMaterializer must not be null"
+                );
     }
 
     @Override
@@ -67,7 +88,8 @@ class DefaultRuntimeGovernanceOrchestrator
                 "request must not be null"
         );
 
-        RuntimeGovernanceContextResolution contextResolution =
+        RuntimeGovernanceContextResolution
+                contextResolution =
                 contextResolver.resolve(
                         request
                 );
@@ -85,7 +107,8 @@ class DefaultRuntimeGovernanceOrchestrator
                         contextResolution)
                         .context();
 
-        RuntimeRiskAssessmentResolution riskResolution =
+        RuntimeRiskAssessmentResolution
+                riskResolution =
                 riskAssessmentResolver.resolve(
                         request
                 );
@@ -110,7 +133,8 @@ class DefaultRuntimeGovernanceOrchestrator
                         riskAssessment
                 );
 
-        RuntimeGovernanceDecisionResolution decisionResolution =
+        RuntimeGovernanceDecisionResolution
+                decisionResolution =
                 governanceDecisionResolver.resolve(
                         context,
                         request,
@@ -126,20 +150,63 @@ class DefaultRuntimeGovernanceOrchestrator
             );
         }
 
+        GovernanceDecision decision =
+                ((RuntimeGovernanceDecisionResolution.Ready)
+                        decisionResolution)
+                        .decision();
+
+        Optional<ApprovalRequest> approvalRequest =
+                materializeApprovalIfRequired(
+                        request,
+                        decision
+                );
+
         return new RuntimeGovernanceResult.Governed(
                 context.policyBinding(),
                 riskAssessment,
-                ((RuntimeGovernanceDecisionResolution.Ready)
-                        decisionResolution)
-                        .decision()
+                decision,
+                approvalRequest
         );
     }
 
-    private RuntimeGovernanceResult.FailedClosed failedClosed(
-            RuntimeGovernanceRequest request,
-            com.proofmesh.controlplane.runtimegovernance
-                    .RuntimeGovernanceFailureReason reason
-    ) {
+    private Optional<ApprovalRequest>
+            materializeApprovalIfRequired(
+                    RuntimeGovernanceRequest request,
+                    GovernanceDecision decision
+            ) {
+
+        if (!decision.requiresApproval()) {
+            return Optional.empty();
+        }
+
+        Instant requestedAt =
+                request.evaluatedAt();
+
+        Instant expiresAt =
+                requestedAt.plus(
+                        DEFAULT_APPROVAL_WINDOW
+                );
+
+        ApprovalRequest approvalRequest =
+                approvalRequestMaterializer.materialize(
+                        request.governedAction(),
+                        decision,
+                        requestedAt,
+                        expiresAt
+                );
+
+        return Optional.of(
+                approvalRequest
+        );
+    }
+
+    private RuntimeGovernanceResult.FailedClosed
+            failedClosed(
+                    RuntimeGovernanceRequest request,
+                    com.proofmesh.controlplane.runtimegovernance
+                            .RuntimeGovernanceFailureReason reason
+            ) {
+
         GovernedAction governedAction =
                 request.governedAction();
 

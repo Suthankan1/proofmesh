@@ -1,10 +1,12 @@
 package com.proofmesh.controlplane.runtimegovernance;
 
+import com.proofmesh.controlplane.approval.ApprovalRequest;
 import com.proofmesh.controlplane.decision.GovernanceDecision;
 import com.proofmesh.controlplane.policy.AgentPolicyBinding;
 import com.proofmesh.controlplane.risk.RiskAssessment;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 public sealed interface RuntimeGovernanceResult
@@ -14,7 +16,8 @@ public sealed interface RuntimeGovernanceResult
     record Governed(
             AgentPolicyBinding policyBinding,
             RiskAssessment riskAssessment,
-            GovernanceDecision decision
+            GovernanceDecision decision,
+            Optional<ApprovalRequest> approvalRequest
     ) implements RuntimeGovernanceResult {
 
         public Governed {
@@ -33,21 +36,33 @@ public sealed interface RuntimeGovernanceResult
                     "decision must not be null"
             );
 
+            Objects.requireNonNull(
+                    approvalRequest,
+                    "approvalRequest must not be null"
+            );
+
+            if (decision.requiresApproval()
+                    != approvalRequest.isPresent()) {
+                throw new IllegalArgumentException(
+                        "REQUIRE_APPROVAL governance decisions must have an approval request, and other outcomes must not"
+                );
+            }
+
             if (!policyBinding.organizationId()
                     .equals(
                             riskAssessment.organizationId()
                     )) {
                 throw new IllegalArgumentException(
-                        "policy binding and risk assessment organization must match"
+                        "policy binding and risk assessment must belong to the same organization"
                 );
             }
 
-            if (!riskAssessment.organizationId()
+            if (!policyBinding.organizationId()
                     .equals(
                             decision.organizationId()
                     )) {
                 throw new IllegalArgumentException(
-                        "risk assessment and governance decision organization must match"
+                        "policy binding and governance decision must belong to the same organization"
                 );
             }
 
@@ -56,7 +71,7 @@ public sealed interface RuntimeGovernanceResult
                             decision.governedActionId()
                     )) {
                 throw new IllegalArgumentException(
-                        "risk assessment and governance decision action must match"
+                        "risk assessment and governance decision must reference the same governed action"
                 );
             }
 
@@ -65,7 +80,7 @@ public sealed interface RuntimeGovernanceResult
                             decision.policyVersionId()
                     )) {
                 throw new IllegalArgumentException(
-                        "policy binding and governance decision policy version must match"
+                        "governance decision must reference the bound policy version"
                 );
             }
 
@@ -74,9 +89,62 @@ public sealed interface RuntimeGovernanceResult
                             decision.riskScore()
                     )) {
                 throw new IllegalArgumentException(
-                        "risk assessment and governance decision risk score must match"
+                        "governance decision risk score must match the authoritative risk assessment"
                 );
             }
+
+            approvalRequest.ifPresent(
+                    approval -> {
+                        if (!approval.organizationId()
+                                .equals(
+                                        decision.organizationId()
+                                )) {
+                            throw new IllegalArgumentException(
+                                    "approval request and governance decision must belong to the same organization"
+                            );
+                        }
+
+                        if (!approval.governedActionId()
+                                .equals(
+                                        decision.governedActionId()
+                                )) {
+                            throw new IllegalArgumentException(
+                                    "approval request must reference the governed action"
+                            );
+                        }
+
+                        if (!approval.governanceDecisionId()
+                                .equals(
+                                        decision.id()
+                                )) {
+                            throw new IllegalArgumentException(
+                                    "approval request must reference the governance decision"
+                            );
+                        }
+
+                        if (!approval.agentId()
+                                .equals(
+                                        policyBinding.agentId()
+                                )) {
+                            throw new IllegalArgumentException(
+                                    "approval request must reference the bound agent"
+                            );
+                        }
+                    }
+            );
+        }
+
+        public Governed(
+                AgentPolicyBinding policyBinding,
+                RiskAssessment riskAssessment,
+                GovernanceDecision decision
+        ) {
+            this(
+                    policyBinding,
+                    riskAssessment,
+                    decision,
+                    Optional.empty()
+            );
         }
     }
 
