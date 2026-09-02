@@ -5,24 +5,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.proofmesh.controlplane.approval.ApprovalActorId;
 import com.proofmesh.controlplane.approval.ApprovalRequest;
+import com.proofmesh.controlplane.approval.ApprovalRequestExpiryStore;
 import com.proofmesh.controlplane.approval.ApprovalRequestInsertResult;
 import com.proofmesh.controlplane.approval.ApprovalRequestRepository;
+import com.proofmesh.controlplane.approval.ApprovalRequestResolutionStore;
+import com.proofmesh.controlplane.approval.ApprovalRequestResolver;
+import com.proofmesh.controlplane.approval.ApprovalResolutionConflictException;
 import com.proofmesh.controlplane.approval.ApprovalRationale;
 import com.proofmesh.controlplane.approval.ApprovalState;
 import com.proofmesh.controlplane.governedaction.OperationName;
 import com.proofmesh.controlplane.governedaction.RequestPayloadHash;
 import com.proofmesh.controlplane.governedaction.ToolName;
-import org.springframework.dao.InvalidDataAccessApiUsageException;
-
-import com.proofmesh.controlplane.approval.ApprovalRequestResolver;
-import com.proofmesh.controlplane.approval.ApprovalResolutionConflictException;
-
-import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,12 +23,19 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.InvalidDataAccessApiUsageException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 @SpringBootTest
 @Import(TestcontainersConfiguration.class)
@@ -88,10 +88,18 @@ class ApprovalRequestRepositoryIntegrationTest {
     ApprovalRequestRepository approvalRequestRepository;
 
     @Autowired
-    JdbcTemplate jdbcTemplate;
+    ApprovalRequestResolver approvalRequestResolver;
 
     @Autowired
-    ApprovalRequestResolver approvalRequestResolver;
+    ApprovalRequestResolutionStore
+            approvalRequestResolutionStore;
+
+    @Autowired
+    ApprovalRequestExpiryStore
+            approvalRequestExpiryStore;
+
+    @Autowired
+    JdbcTemplate jdbcTemplate;
 
     private UUID organizationId;
     private UUID otherOrganizationId;
@@ -377,13 +385,15 @@ class ApprovalRequestRepositoryIntegrationTest {
                         )
                         .orElseThrow();
 
-        assertThat(stored.isApproved())
-                .isTrue();
+        assertThat(
+                stored.isApproved()
+        ).isTrue();
 
-        assertThat(stored.state())
-                .isInstanceOf(
-                        ApprovalState.Approved.class
-                );
+        assertThat(
+                stored.state()
+        ).isInstanceOf(
+                ApprovalState.Approved.class
+        );
 
         ApprovalState.Approved approved =
                 (ApprovalState.Approved)
@@ -439,13 +449,15 @@ class ApprovalRequestRepositoryIntegrationTest {
                         )
                         .orElseThrow();
 
-        assertThat(stored.isRejected())
-                .isTrue();
+        assertThat(
+                stored.isRejected()
+        ).isTrue();
 
-        assertThat(stored.state())
-                .isInstanceOf(
-                        ApprovalState.Rejected.class
-                );
+        assertThat(
+                stored.state()
+        ).isInstanceOf(
+                ApprovalState.Rejected.class
+        );
     }
 
     @Test
@@ -479,13 +491,15 @@ class ApprovalRequestRepositoryIntegrationTest {
                         )
                         .orElseThrow();
 
-        assertThat(stored.isExpired())
-                .isTrue();
+        assertThat(
+                stored.isExpired()
+        ).isTrue();
 
-        assertThat(stored.state())
-                .isInstanceOf(
-                        ApprovalState.Expired.class
-                );
+        assertThat(
+                stored.state()
+        ).isInstanceOf(
+                ApprovalState.Expired.class
+        );
 
         ApprovalState.Expired expired =
                 (ApprovalState.Expired)
@@ -671,11 +685,11 @@ class ApprovalRequestRepositoryIntegrationTest {
                             SELECT COUNT(*)
                             FROM proofmesh.approval_requests
                             WHERE id = ?
-                            AND organization_id = ?
-                            AND status IN (
-                                'APPROVED',
-                                'REJECTED'
-                            )
+                              AND organization_id = ?
+                              AND status IN (
+                                  'APPROVED',
+                                  'REJECTED'
+                              )
                             """,
                             Long.class,
                             pending.id(),
@@ -684,6 +698,193 @@ class ApprovalRequestRepositoryIntegrationTest {
 
             assertThat(
                     terminalRowCount
+            ).isEqualTo(
+                    1L
+            );
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentApprovalAndExpiryProduceOneLifecycleWinner()
+            throws Exception {
+
+        ApprovalRequest pending =
+                pendingRequest(
+                        UUID.randomUUID()
+                );
+
+        approvalRequestRepository
+                .insertIfAbsent(
+                        pending
+                );
+
+        ApprovalActorId actorId =
+                new ApprovalActorId(
+                        "operator-expiry-race"
+                );
+
+        ApprovalRationale rationale =
+                new ApprovalRationale(
+                        "Approved immediately before the expiry boundary."
+                );
+
+        Instant approvalTime =
+                EXPIRES_AT.minusSeconds(
+                        1
+                );
+
+        Instant expiryTime =
+                EXPIRES_AT;
+
+        CountDownLatch ready =
+                new CountDownLatch(
+                        2
+                );
+
+        CountDownLatch start =
+                new CountDownLatch(
+                        1
+                );
+
+        ExecutorService executor =
+                Executors.newFixedThreadPool(
+                        2
+                );
+
+        try {
+            Future<Boolean> approvalFuture =
+                    executor.submit(
+                            () -> {
+                                ready.countDown();
+
+                                if (!start.await(
+                                        5,
+                                        TimeUnit.SECONDS
+                                )) {
+                                    throw new IllegalStateException(
+                                            "timed out waiting to start approval"
+                                    );
+                                }
+
+                                return approvalRequestResolutionStore
+                                        .approvePending(
+                                                organizationId,
+                                                pending.id(),
+                                                actorId,
+                                                rationale,
+                                                approvalTime
+                                        );
+                            }
+                    );
+
+            Future<Boolean> expiryFuture =
+                    executor.submit(
+                            () -> {
+                                ready.countDown();
+
+                                if (!start.await(
+                                        5,
+                                        TimeUnit.SECONDS
+                                )) {
+                                    throw new IllegalStateException(
+                                            "timed out waiting to start expiry"
+                                    );
+                                }
+
+                                return approvalRequestExpiryStore
+                                        .expirePending(
+                                                organizationId,
+                                                pending.id(),
+                                                expiryTime
+                                        );
+                            }
+                    );
+
+            assertThat(
+                    ready.await(
+                            5,
+                            TimeUnit.SECONDS
+                    )
+            ).isTrue();
+
+            start.countDown();
+
+            boolean approvalWon =
+                    approvalFuture.get(
+                            10,
+                            TimeUnit.SECONDS
+                    );
+
+            boolean expiryWon =
+                    expiryFuture.get(
+                            10,
+                            TimeUnit.SECONDS
+                    );
+
+            assertThat(
+                    approvalWon
+                            ^ expiryWon
+            ).isTrue();
+
+            ApprovalRequest authoritative =
+                    approvalRequestRepository
+                            .findByOrganizationIdAndId(
+                                    organizationId,
+                                    pending.id()
+                            )
+                            .orElseThrow();
+
+            if (approvalWon) {
+                assertThat(
+                        authoritative.isApproved()
+                ).isTrue();
+
+                assertThat(
+                        authoritative.isExpired()
+                ).isFalse();
+            }
+
+            if (expiryWon) {
+                assertThat(
+                        authoritative.isExpired()
+                ).isTrue();
+
+                assertThat(
+                        authoritative.isApproved()
+                ).isFalse();
+
+                ApprovalState.Expired expired =
+                        (ApprovalState.Expired)
+                                authoritative.state();
+
+                assertThat(
+                        expired.expiredAt()
+                ).isEqualTo(
+                        expiryTime
+                );
+            }
+
+            Long rowCount =
+                    jdbcTemplate.queryForObject(
+                            """
+                            SELECT COUNT(*)
+                            FROM proofmesh.approval_requests
+                            WHERE id = ?
+                              AND organization_id = ?
+                              AND status IN (
+                                  'APPROVED',
+                                  'EXPIRED'
+                              )
+                            """,
+                            Long.class,
+                            pending.id(),
+                            organizationId
+                    );
+
+            assertThat(
+                    rowCount
             ).isEqualTo(
                     1L
             );
