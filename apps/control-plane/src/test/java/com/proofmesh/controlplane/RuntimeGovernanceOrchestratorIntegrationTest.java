@@ -2,8 +2,12 @@ package com.proofmesh.controlplane;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.proofmesh.controlplane.approval.ApprovalActorId;
+import com.proofmesh.controlplane.approval.ApprovalRationale;
 import com.proofmesh.controlplane.approval.ApprovalRequest;
+import com.proofmesh.controlplane.approval.ApprovalRequestExpirer;
 import com.proofmesh.controlplane.approval.ApprovalRequestRepository;
+import com.proofmesh.controlplane.approval.ApprovalRequestResolver;
 import com.proofmesh.controlplane.decision.DecisionOutcome;
 import com.proofmesh.controlplane.decision.GovernanceDecision;
 import com.proofmesh.controlplane.decision.GovernanceDecisionRepository;
@@ -152,6 +156,31 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
                     15
             );
 
+    private static final ApprovalActorId APPROVER_ACTOR_ID =
+            new ApprovalActorId(
+                    "runtime-governance-test-approver"
+            );
+
+    private static final ApprovalRationale APPROVAL_RATIONALE =
+            new ApprovalRationale(
+                    "Reviewed and authorized for exact runtime retry."
+            );
+
+    private static final ApprovalRationale REJECTION_RATIONALE =
+            new ApprovalRationale(
+                    "Reviewed and rejected for runtime execution."
+            );
+
+    private static final Instant APPROVED_AT =
+            EVALUATED_AT.plusSeconds(
+                    60
+            );
+
+    private static final Instant RETRY_AT =
+            EVALUATED_AT.plusSeconds(
+                    120
+            );
+
     @Autowired
     JdbcTemplate jdbcTemplate;
 
@@ -178,6 +207,12 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
 
     @Autowired
     ApprovalRequestRepository approvalRequestRepository;
+
+    @Autowired
+    ApprovalRequestResolver approvalRequestResolver;
+
+    @Autowired
+    ApprovalRequestExpirer approvalRequestExpirer;
 
     @Test
     void unknownAgentFailsClosedBeforeRiskOrDecisionPersistence() {
@@ -701,6 +736,553 @@ class RuntimeGovernanceOrchestratorIntegrationTest {
                 secondApproval.governanceDecisionId()
         ).isNotEqualTo(
                 DECISION_ID_2
+        );
+
+        assertThat(
+                riskRowCount()
+        ).isEqualTo(
+                1L
+        );
+
+        assertThat(
+                decisionRowCount()
+        ).isEqualTo(
+                1L
+        );
+
+        assertThat(
+                approvalRowCount()
+        ).isEqualTo(
+                1L
+        );
+    }
+
+    @Test
+    void approvedExactRetryReturnsAuthoritativeValidApproval() {
+        insertOrganization();
+
+        insertAgent(
+                "ACTIVE"
+        );
+
+        GovernedAction governedAction =
+                persistGovernedAction();
+
+        publishAndBindPolicy(
+                80,
+                PolicyEffect.REQUIRE_APPROVAL,
+                "HIGH_RISK_REFUND"
+        );
+
+        RuntimeGovernanceResult firstResult =
+                orchestrator.govern(
+                        request(
+                                governedAction,
+                                RISK_ASSESSMENT_ID_1,
+                                DECISION_ID_1,
+                                riskSignal(
+                                        90
+                                ),
+                                EVALUATED_AT
+                        )
+                );
+
+        RuntimeGovernanceResult.Governed first =
+                (RuntimeGovernanceResult.Governed)
+                        firstResult;
+
+        ApprovalRequest pendingApproval =
+                first
+                        .approvalRequest()
+                        .orElseThrow();
+
+        assertThat(
+                pendingApproval.isPending()
+        ).isTrue();
+
+        ApprovalRequest approvedApproval =
+                approvalRequestResolver.approve(
+                        ORGANIZATION_ID,
+                        pendingApproval.id(),
+                        APPROVER_ACTOR_ID,
+                        APPROVAL_RATIONALE,
+                        APPROVED_AT
+                );
+
+        assertThat(
+                approvedApproval.id()
+        ).isEqualTo(
+                pendingApproval.id()
+        );
+
+        assertThat(
+                approvedApproval.isApproved()
+        ).isTrue();
+
+        assertThat(
+                approvedApproval.isApprovedAndValidAt(
+                        RETRY_AT
+                )
+        ).isTrue();
+
+        RuntimeGovernanceResult retryResult =
+                orchestrator.govern(
+                        request(
+                                governedAction,
+                                RISK_ASSESSMENT_ID_2,
+                                DECISION_ID_2,
+                                riskSignal(
+                                        90
+                                ),
+                                RETRY_AT
+                        )
+                );
+
+        RuntimeGovernanceResult.Governed retry =
+                (RuntimeGovernanceResult.Governed)
+                        retryResult;
+
+        ApprovalRequest retryApproval =
+                retry
+                        .approvalRequest()
+                        .orElseThrow();
+
+        /*
+         * Human approval does not rewrite the immutable
+         * governance decision into ALLOW.
+         *
+         * Execution authority will later be derived from
+         * REQUIRE_APPROVAL + a valid authoritative approval.
+         */
+        assertThat(
+                retry.decision().outcome()
+        ).isEqualTo(
+                DecisionOutcome.REQUIRE_APPROVAL
+        );
+
+        assertThat(
+                retry.decision().id()
+        ).isEqualTo(
+                first.decision().id()
+        );
+
+        assertThat(
+                retry.decision().id()
+        ).isNotEqualTo(
+                DECISION_ID_2
+        );
+
+        assertThat(
+                retryApproval.id()
+        ).isEqualTo(
+                pendingApproval.id()
+        );
+
+        assertThat(
+                retryApproval.governanceDecisionId()
+        ).isEqualTo(
+                first.decision().id()
+        );
+
+        assertThat(
+                retryApproval.governedActionId()
+        ).isEqualTo(
+                ACTION_ID
+        );
+
+        assertThat(
+                retryApproval.requestPayloadHash()
+        ).isEqualTo(
+                governedAction.requestPayloadHash()
+        );
+
+        assertThat(
+                retryApproval.requestedAt()
+        ).isEqualTo(
+                pendingApproval.requestedAt()
+        );
+
+        assertThat(
+                retryApproval.expiresAt()
+        ).isEqualTo(
+                pendingApproval.expiresAt()
+        );
+
+        assertThat(
+                retryApproval.isApproved()
+        ).isTrue();
+
+        assertThat(
+                retryApproval.isApprovedAndValidAt(
+                        RETRY_AT
+                )
+        ).isTrue();
+
+        /*
+         * APPROVED is historical state.
+         * Crossing the TTL does not rewrite it to EXPIRED.
+         * Its authorization validity simply becomes false.
+         */
+        assertThat(
+                retryApproval.isApprovedAndValidAt(
+                        retryApproval.expiresAt()
+                )
+        ).isFalse();
+
+        assertThat(
+                retryApproval.isApproved()
+        ).isTrue();
+
+        assertThat(
+                riskRowCount()
+        ).isEqualTo(
+                1L
+        );
+
+        assertThat(
+                decisionRowCount()
+        ).isEqualTo(
+                1L
+        );
+
+        assertThat(
+                approvalRowCount()
+        ).isEqualTo(
+                1L
+        );
+    }
+
+    @Test
+    void rejectedExactRetryReturnsSameNonAuthorizingApproval() {
+        insertOrganization();
+
+        insertAgent(
+                "ACTIVE"
+        );
+
+        GovernedAction governedAction =
+                persistGovernedAction();
+
+        publishAndBindPolicy(
+                80,
+                PolicyEffect.REQUIRE_APPROVAL,
+                "HIGH_RISK_REFUND"
+        );
+
+        RuntimeGovernanceResult firstResult =
+                orchestrator.govern(
+                        request(
+                                governedAction,
+                                RISK_ASSESSMENT_ID_1,
+                                DECISION_ID_1,
+                                riskSignal(
+                                        90
+                                ),
+                                EVALUATED_AT
+                        )
+                );
+
+        RuntimeGovernanceResult.Governed first =
+                (RuntimeGovernanceResult.Governed)
+                        firstResult;
+
+        ApprovalRequest pendingApproval =
+                first
+                        .approvalRequest()
+                        .orElseThrow();
+
+        assertThat(
+                pendingApproval.isPending()
+        ).isTrue();
+
+        ApprovalRequest rejectedApproval =
+                approvalRequestResolver.reject(
+                        ORGANIZATION_ID,
+                        pendingApproval.id(),
+                        APPROVER_ACTOR_ID,
+                        REJECTION_RATIONALE,
+                        APPROVED_AT
+                );
+
+        assertThat(
+                rejectedApproval.id()
+        ).isEqualTo(
+                pendingApproval.id()
+        );
+
+        assertThat(
+                rejectedApproval.isRejected()
+        ).isTrue();
+
+        assertThat(
+                rejectedApproval.isApprovedAndValidAt(
+                        RETRY_AT
+                )
+        ).isFalse();
+
+        RuntimeGovernanceResult retryResult =
+                orchestrator.govern(
+                        request(
+                                governedAction,
+                                RISK_ASSESSMENT_ID_2,
+                                DECISION_ID_2,
+                                riskSignal(
+                                        90
+                                ),
+                                RETRY_AT
+                        )
+                );
+
+        RuntimeGovernanceResult.Governed retry =
+                (RuntimeGovernanceResult.Governed)
+                        retryResult;
+
+        ApprovalRequest retryApproval =
+                retry
+                        .approvalRequest()
+                        .orElseThrow();
+
+        assertThat(
+                retry.decision().outcome()
+        ).isEqualTo(
+                DecisionOutcome.REQUIRE_APPROVAL
+        );
+
+        assertThat(
+                retry.decision().id()
+        ).isEqualTo(
+                first.decision().id()
+        );
+
+        assertThat(
+                retry.decision().id()
+        ).isNotEqualTo(
+                DECISION_ID_2
+        );
+
+        assertThat(
+                retryApproval.id()
+        ).isEqualTo(
+                pendingApproval.id()
+        );
+
+        assertThat(
+                retryApproval.governanceDecisionId()
+        ).isEqualTo(
+                first.decision().id()
+        );
+
+        assertThat(
+                retryApproval.governedActionId()
+        ).isEqualTo(
+                ACTION_ID
+        );
+
+        assertThat(
+                retryApproval.requestPayloadHash()
+        ).isEqualTo(
+                governedAction.requestPayloadHash()
+        );
+
+        assertThat(
+                retryApproval.isRejected()
+        ).isTrue();
+
+        assertThat(
+                retryApproval.isApprovedAndValidAt(
+                        RETRY_AT
+                )
+        ).isFalse();
+
+        assertThat(
+                retryApproval.requestedAt()
+        ).isEqualTo(
+                pendingApproval.requestedAt()
+        );
+
+        assertThat(
+                retryApproval.expiresAt()
+        ).isEqualTo(
+                pendingApproval.expiresAt()
+        );
+
+        assertThat(
+                riskRowCount()
+        ).isEqualTo(
+                1L
+        );
+
+        assertThat(
+                decisionRowCount()
+        ).isEqualTo(
+                1L
+        );
+
+        assertThat(
+                approvalRowCount()
+        ).isEqualTo(
+                1L
+        );
+    }
+
+    @Test
+    void expiredExactRetryReturnsSameNonAuthorizingApproval() {
+        insertOrganization();
+
+        insertAgent(
+                "ACTIVE"
+        );
+
+        GovernedAction governedAction =
+                persistGovernedAction();
+
+        publishAndBindPolicy(
+                80,
+                PolicyEffect.REQUIRE_APPROVAL,
+                "HIGH_RISK_REFUND"
+        );
+
+        RuntimeGovernanceResult firstResult =
+                orchestrator.govern(
+                        request(
+                                governedAction,
+                                RISK_ASSESSMENT_ID_1,
+                                DECISION_ID_1,
+                                riskSignal(
+                                        90
+                                ),
+                                EVALUATED_AT
+                        )
+                );
+
+        RuntimeGovernanceResult.Governed first =
+                (RuntimeGovernanceResult.Governed)
+                        firstResult;
+
+        ApprovalRequest pendingApproval =
+                first
+                        .approvalRequest()
+                        .orElseThrow();
+
+        assertThat(
+                pendingApproval.isPending()
+        ).isTrue();
+
+        Instant expiredAt =
+                pendingApproval.expiresAt();
+
+        ApprovalRequest expiredApproval =
+                approvalRequestExpirer.expire(
+                        ORGANIZATION_ID,
+                        pendingApproval.id(),
+                        expiredAt
+                );
+
+        assertThat(
+                expiredApproval.id()
+        ).isEqualTo(
+                pendingApproval.id()
+        );
+
+        assertThat(
+                expiredApproval.isExpired()
+        ).isTrue();
+
+        Instant retryAt =
+                expiredAt.plusSeconds(
+                        1
+                );
+
+        assertThat(
+                expiredApproval.isApprovedAndValidAt(
+                        retryAt
+                )
+        ).isFalse();
+
+        RuntimeGovernanceResult retryResult =
+                orchestrator.govern(
+                        request(
+                                governedAction,
+                                RISK_ASSESSMENT_ID_2,
+                                DECISION_ID_2,
+                                riskSignal(
+                                        90
+                                ),
+                                retryAt
+                        )
+                );
+
+        RuntimeGovernanceResult.Governed retry =
+                (RuntimeGovernanceResult.Governed)
+                        retryResult;
+
+        ApprovalRequest retryApproval =
+                retry
+                        .approvalRequest()
+                        .orElseThrow();
+
+        assertThat(
+                retry.decision().outcome()
+        ).isEqualTo(
+                DecisionOutcome.REQUIRE_APPROVAL
+        );
+
+        assertThat(
+                retry.decision().id()
+        ).isEqualTo(
+                first.decision().id()
+        );
+
+        assertThat(
+                retry.decision().id()
+        ).isNotEqualTo(
+                DECISION_ID_2
+        );
+
+        assertThat(
+                retryApproval.id()
+        ).isEqualTo(
+                pendingApproval.id()
+        );
+
+        assertThat(
+                retryApproval.governanceDecisionId()
+        ).isEqualTo(
+                first.decision().id()
+        );
+
+        assertThat(
+                retryApproval.governedActionId()
+        ).isEqualTo(
+                ACTION_ID
+        );
+
+        assertThat(
+                retryApproval.requestPayloadHash()
+        ).isEqualTo(
+                governedAction.requestPayloadHash()
+        );
+
+        assertThat(
+                retryApproval.isExpired()
+        ).isTrue();
+
+        assertThat(
+                retryApproval.isApprovedAndValidAt(
+                        retryAt
+                )
+        ).isFalse();
+
+        assertThat(
+                retryApproval.requestedAt()
+        ).isEqualTo(
+                pendingApproval.requestedAt()
+        );
+
+        assertThat(
+                retryApproval.expiresAt()
+        ).isEqualTo(
+                pendingApproval.expiresAt()
         );
 
         assertThat(
