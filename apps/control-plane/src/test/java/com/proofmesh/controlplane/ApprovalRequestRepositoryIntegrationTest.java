@@ -14,6 +14,16 @@ import com.proofmesh.controlplane.governedaction.RequestPayloadHash;
 import com.proofmesh.controlplane.governedaction.ToolName;
 import org.springframework.dao.InvalidDataAccessApiUsageException;
 
+import com.proofmesh.controlplane.approval.ApprovalRequestResolver;
+import com.proofmesh.controlplane.approval.ApprovalResolutionConflictException;
+
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -79,6 +89,9 @@ class ApprovalRequestRepositoryIntegrationTest {
 
     @Autowired
     JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    ApprovalRequestResolver approvalRequestResolver;
 
     private UUID organizationId;
     private UUID otherOrganizationId;
@@ -483,6 +496,200 @@ class ApprovalRequestRepositoryIntegrationTest {
         ).isEqualTo(
                 EXPIRED_AT.toInstant()
         );
+    }
+
+    @Test
+    void concurrentApproveAndRejectProduceOneAuthoritativeResolution()
+            throws Exception {
+
+        ApprovalRequest pending =
+                pendingRequest(
+                        UUID.randomUUID()
+                );
+
+        approvalRequestRepository
+                .insertIfAbsent(
+                        pending
+                );
+
+        ApprovalActorId approvingActor =
+                new ApprovalActorId(
+                        "operator-approve"
+                );
+
+        ApprovalRationale approvalRationale =
+                new ApprovalRationale(
+                        "Approved after exact request review."
+                );
+
+        ApprovalActorId rejectingActor =
+                new ApprovalActorId(
+                        "operator-reject"
+                );
+
+        ApprovalRationale rejectionRationale =
+                new ApprovalRationale(
+                        "Rejected after exact request review."
+                );
+
+        Instant resolvedAt =
+                Instant.parse(
+                        "2026-09-01T10:10:00Z"
+                );
+
+        CountDownLatch ready =
+                new CountDownLatch(
+                        2
+                );
+
+        CountDownLatch start =
+                new CountDownLatch(
+                        1
+                );
+
+        ExecutorService executor =
+                Executors.newFixedThreadPool(
+                        2
+                );
+
+        try {
+            Future<Boolean> approveFuture =
+                    executor.submit(
+                            () -> {
+                                ready.countDown();
+
+                                if (!start.await(
+                                        5,
+                                        TimeUnit.SECONDS
+                                )) {
+                                    throw new IllegalStateException(
+                                            "timed out waiting to start approval"
+                                    );
+                                }
+
+                                try {
+                                    approvalRequestResolver
+                                            .approve(
+                                                    organizationId,
+                                                    pending.id(),
+                                                    approvingActor,
+                                                    approvalRationale,
+                                                    resolvedAt
+                                            );
+
+                                    return true;
+                                } catch (
+                                        ApprovalResolutionConflictException
+                                                exception
+                                ) {
+                                    return false;
+                                }
+                            }
+                    );
+
+            Future<Boolean> rejectFuture =
+                    executor.submit(
+                            () -> {
+                                ready.countDown();
+
+                                if (!start.await(
+                                        5,
+                                        TimeUnit.SECONDS
+                                )) {
+                                    throw new IllegalStateException(
+                                            "timed out waiting to start rejection"
+                                    );
+                                }
+
+                                try {
+                                    approvalRequestResolver
+                                            .reject(
+                                                    organizationId,
+                                                    pending.id(),
+                                                    rejectingActor,
+                                                    rejectionRationale,
+                                                    resolvedAt
+                                            );
+
+                                    return true;
+                                } catch (
+                                        ApprovalResolutionConflictException
+                                                exception
+                                ) {
+                                    return false;
+                                }
+                            }
+                    );
+
+            assertThat(
+                    ready.await(
+                            5,
+                            TimeUnit.SECONDS
+                    )
+            ).isTrue();
+
+            start.countDown();
+
+            List<Boolean> results =
+                    List.of(
+                            approveFuture.get(
+                                    10,
+                                    TimeUnit.SECONDS
+                            ),
+                            rejectFuture.get(
+                                    10,
+                                    TimeUnit.SECONDS
+                            )
+                    );
+
+            assertThat(
+                    results.stream()
+                            .filter(
+                                    Boolean::booleanValue
+                            )
+                            .count()
+            ).isEqualTo(
+                    1
+            );
+
+            ApprovalRequest authoritative =
+                    approvalRequestRepository
+                            .findByOrganizationIdAndId(
+                                    organizationId,
+                                    pending.id()
+                            )
+                            .orElseThrow();
+
+            assertThat(
+                    authoritative.isApproved()
+                            || authoritative.isRejected()
+            ).isTrue();
+
+            Long terminalRowCount =
+                    jdbcTemplate.queryForObject(
+                            """
+                            SELECT COUNT(*)
+                            FROM proofmesh.approval_requests
+                            WHERE id = ?
+                            AND organization_id = ?
+                            AND status IN (
+                                'APPROVED',
+                                'REJECTED'
+                            )
+                            """,
+                            Long.class,
+                            pending.id(),
+                            organizationId
+                    );
+
+            assertThat(
+                    terminalRowCount
+            ).isEqualTo(
+                    1L
+            );
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     private ApprovalRequest pendingRequest(
