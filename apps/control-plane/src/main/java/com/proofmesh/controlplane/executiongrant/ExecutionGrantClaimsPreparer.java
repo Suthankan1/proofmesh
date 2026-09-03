@@ -1,6 +1,7 @@
 package com.proofmesh.controlplane.executiongrant;
 
 import com.proofmesh.controlplane.approval.ApprovalRequest;
+import com.proofmesh.controlplane.decision.GovernanceDecision;
 import com.proofmesh.controlplane.governedaction.GovernedAction;
 import com.proofmesh.controlplane.runtimegovernance.RuntimeGovernanceResult;
 
@@ -43,6 +44,38 @@ public final class ExecutionGrantClaimsPreparer {
     }
 
     public ExecutionGrantClaimsPreparationResult prepareClaims(
+            ExecutionGrantAuthorizationContext context,
+            Instant now
+    ) {
+        Objects.requireNonNull(
+                context,
+                "context must not be null"
+        );
+
+        Objects.requireNonNull(
+                now,
+                "now must not be null"
+        );
+
+        ExecutionGrantEligibility eligibility =
+                eligibilityEvaluator.evaluate(
+                        context,
+                        now
+                );
+
+        if (eligibility instanceof ExecutionGrantEligibility.Ineligible ineligible) {
+            return new ExecutionGrantClaimsPreparationResult.Ineligible(
+                    ineligible.reason()
+            );
+        }
+
+        return prepareEligibleClaims(
+                context,
+                now
+        );
+    }
+
+    public ExecutionGrantClaimsPreparationResult prepareClaims(
             GovernedAction governedAction,
             RuntimeGovernanceResult runtimeResult,
             Instant now
@@ -81,6 +114,28 @@ public final class ExecutionGrantClaimsPreparer {
             );
         }
 
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction,
+                        governed.decision(),
+                        governed.approvalRequest()
+                );
+
+        return prepareEligibleClaims(
+                context,
+                now
+        );
+    }
+
+    private ExecutionGrantClaimsPreparationResult prepareEligibleClaims(
+            ExecutionGrantAuthorizationContext context,
+            Instant now
+    ) {
+        GovernedAction governedAction =
+                context.governedAction();
+        GovernanceDecision decision =
+                context.governanceDecision();
+
         Instant issuedAt = now;
         Instant policyExpiresAt =
                 issuedAt.plus(
@@ -89,9 +144,9 @@ public final class ExecutionGrantClaimsPreparer {
 
         Instant expiresAt = policyExpiresAt;
 
-        if (governed.decision().requiresApproval()) {
+        if (decision.requiresApproval()) {
             ApprovalRequest approvalRequest =
-                    governed.approvalRequest()
+                    context.approvalRequest()
                             .orElseThrow(
                                     () -> new IllegalStateException(
                                             "REQUIRE_APPROVAL governance result must have an approval request"
@@ -118,7 +173,7 @@ public final class ExecutionGrantClaimsPreparer {
                         governedAction.organizationId(),
                         governedAction.agentId(),
                         governedAction.id(),
-                        governed.decision().id(),
+                        decision.id(),
                         governedAction.toolName(),
                         governedAction.operationName(),
                         governedAction.requestPayloadHash(),

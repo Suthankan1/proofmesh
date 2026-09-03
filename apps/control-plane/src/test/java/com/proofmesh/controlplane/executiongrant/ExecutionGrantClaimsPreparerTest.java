@@ -837,6 +837,784 @@ class ExecutionGrantClaimsPreparerTest {
     }
 
     @Test
+    void contextExactAllowPreparesClaimsWithExactAuthoritativeProvenance() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.ALLOW
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertThat(result)
+                .isInstanceOf(
+                        ExecutionGrantClaimsPreparationResult.Prepared.class
+                );
+
+        ExecutionGrantClaimsPreparationResult.Prepared prepared =
+                (ExecutionGrantClaimsPreparationResult.Prepared)
+                        result;
+
+        ExecutionGrantClaims claims =
+                prepared.claims();
+
+        assertThat(claims.grantId())
+                .isEqualTo(DEFAULT_GRANT_ID);
+        assertThat(claims.organizationId())
+                .isEqualTo(ORGANIZATION_ID);
+        assertThat(claims.agentId())
+                .isEqualTo(AGENT_ID);
+        assertThat(claims.governedActionId())
+                .isEqualTo(ACTION_ID);
+        assertThat(claims.governanceDecisionId())
+                .isEqualTo(DECISION_ID);
+        assertThat(claims.toolName())
+                .isEqualTo(TOOL_NAME);
+        assertThat(claims.operationName())
+                .isEqualTo(OPERATION_NAME);
+        assertThat(claims.requestPayloadHash())
+                .isEqualTo(REQUEST_PAYLOAD_HASH);
+        assertThat(claims.issuer())
+                .isEqualTo(ISSUER);
+        assertThat(claims.audience())
+                .isEqualTo(AUDIENCE);
+        assertThat(claims.issuedAt())
+                .isEqualTo(APPROVED_AT);
+        assertThat(claims.expiresAt())
+                .isEqualTo(
+                        APPROVED_AT.plus(GRANT_TTL)
+                );
+
+        assertThat(generator.invocationCount())
+                .isEqualTo(1);
+    }
+
+    @Test
+    void contextRequireApprovalWithValidApprovalPreparesClaims() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApproval()
+                        )
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertThat(result)
+                .isInstanceOf(
+                        ExecutionGrantClaimsPreparationResult.Prepared.class
+                );
+
+        ExecutionGrantClaims claims =
+                ((ExecutionGrantClaimsPreparationResult.Prepared) result)
+                        .claims();
+
+        assertThat(claims.issuedAt())
+                .isEqualTo(APPROVED_AT);
+        assertThat(claims.expiresAt())
+                .isEqualTo(
+                        APPROVED_AT.plus(GRANT_TTL)
+                );
+        assertThat(generator.invocationCount())
+                .isEqualTo(1);
+    }
+
+    @Test
+    void contextRequireApprovalWithValidApprovalCapsExpiryToApprovalExpiry() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        Instant nearExpiryNow =
+                APPROVAL_EXPIRES_AT.minusSeconds(10);
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApproval()
+                        )
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        nearExpiryNow
+                );
+
+        assertThat(result)
+                .isInstanceOf(
+                        ExecutionGrantClaimsPreparationResult.Prepared.class
+                );
+
+        ExecutionGrantClaims claims =
+                ((ExecutionGrantClaimsPreparationResult.Prepared) result)
+                        .claims();
+
+        assertThat(claims.issuedAt())
+                .isEqualTo(nearExpiryNow);
+        assertThat(claims.expiresAt())
+                .isEqualTo(APPROVAL_EXPIRES_AT);
+        assertThat(generator.invocationCount())
+                .isEqualTo(1);
+    }
+
+    @Test
+    void contextDenyIsIneligibleAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.DENY
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.DECISION_DENIED
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextMissingApprovalIsIneligibleAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.APPROVAL_NOT_CURRENTLY_VALID
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextPendingApprovalIsIneligibleAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                pendingApproval()
+                        )
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.APPROVAL_NOT_CURRENTLY_VALID
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextRejectedApprovalIsIneligibleAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                rejectedApproval()
+                        )
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.APPROVAL_NOT_CURRENTLY_VALID
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextExpiredApprovalStateIsIneligibleAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                expiredApproval()
+                        )
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVAL_EXPIRES_AT.plusSeconds(1)
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.APPROVAL_NOT_CURRENTLY_VALID
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextHistoricalApprovedApprovalAtExpiresAtIsIneligibleAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApproval()
+                        )
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVAL_EXPIRES_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.APPROVAL_NOT_CURRENTLY_VALID
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextActionOrganizationMismatchPropagatesIneligibleReasonAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedActionWithOrganizationId(
+                                UUID.randomUUID()
+                        ),
+                        governanceDecision(
+                                DecisionOutcome.ALLOW
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.ACTION_PROVENANCE_MISMATCH
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextActionIdMismatchPropagatesIneligibleReasonAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedActionWithId(
+                                UUID.randomUUID()
+                        ),
+                        governanceDecision(
+                                DecisionOutcome.ALLOW
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.ACTION_PROVENANCE_MISMATCH
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextApprovalToolMismatchPropagatesIneligibleReasonAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedActionWithToolName(
+                                new ToolName("github")
+                        ),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApproval()
+                        )
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.APPROVAL_PROVENANCE_MISMATCH
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextApprovalOperationMismatchPropagatesIneligibleReasonAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedActionWithOperationName(
+                                new OperationName("create_issue")
+                        ),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApproval()
+                        )
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.APPROVAL_PROVENANCE_MISMATCH
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextApprovalPayloadHashMismatchPropagatesIneligibleReasonAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedActionWithPayloadHash(
+                                new RequestPayloadHash("b".repeat(64))
+                        ),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApproval()
+                        )
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.APPROVAL_PROVENANCE_MISMATCH
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextApprovalAgentMismatchPropagatesIneligibleReasonAndDoesNotGenerateId() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApprovalWithAgentId(
+                                        UUID.randomUUID()
+                                )
+                        )
+                );
+
+        ExecutionGrantClaimsPreparationResult result =
+                preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason.APPROVAL_PROVENANCE_MISMATCH
+        );
+        assertThat(generator.invocationCount())
+                .isEqualTo(0);
+    }
+
+    @Test
+    void contextTwoSuccessfulPreparationsPreserveDistinctGrantIds() {
+        ExecutionGrantId id1 =
+                new ExecutionGrantId(
+                        UUID.fromString(
+                                "8a000000-0000-0000-0000-000000000001"
+                        )
+                );
+        ExecutionGrantId id2 =
+                new ExecutionGrantId(
+                        UUID.fromString(
+                                "8a000000-0000-0000-0000-000000000002"
+                        )
+                );
+
+        Queue<ExecutionGrantId> ids =
+                new ArrayDeque<>(
+                        List.of(id1, id2)
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        ids::remove,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context1 =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.ALLOW
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantAuthorizationContext context2 =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.ALLOW
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantClaimsPreparationResult result1 =
+                preparer.prepareClaims(
+                        context1,
+                        APPROVED_AT
+                );
+
+        ExecutionGrantClaimsPreparationResult result2 =
+                preparer.prepareClaims(
+                        context2,
+                        APPROVED_AT
+                );
+
+        assertThat(((ExecutionGrantClaimsPreparationResult.Prepared) result1).claims().grantId())
+                .isEqualTo(id1);
+        assertThat(((ExecutionGrantClaimsPreparationResult.Prepared) result2).claims().grantId())
+                .isEqualTo(id2);
+    }
+
+    @Test
+    void contextRejectsNullMethodArguments() {
+        CountingGrantIdGenerator generator =
+                new CountingGrantIdGenerator(
+                        DEFAULT_GRANT_ID
+                );
+
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        generator,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.ALLOW
+                        ),
+                        Optional.empty()
+                );
+
+        assertThatThrownBy(
+                () -> preparer.prepareClaims(
+                        (ExecutionGrantAuthorizationContext) null,
+                        APPROVED_AT
+                )
+        )
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("context must not be null");
+
+        assertThatThrownBy(
+                () -> preparer.prepareClaims(
+                        context,
+                        null
+                )
+        )
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("now must not be null");
+    }
+
+    @Test
+    void contextRejectsNullGrantIdFromGenerator() {
+        ExecutionGrantClaimsPreparer preparer =
+                new ExecutionGrantClaimsPreparer(
+                        eligibilityEvaluator,
+                        () -> null,
+                        POLICY
+                );
+
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.ALLOW
+                        ),
+                        Optional.empty()
+                );
+
+        assertThatThrownBy(
+                () -> preparer.prepareClaims(
+                        context,
+                        APPROVED_AT
+                )
+        )
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("grantId must not be null");
+    }
+
+    @Test
     void rejectsNullGrantIdFromGenerator() {
         ExecutionGrantClaimsPreparer preparer =
                 new ExecutionGrantClaimsPreparer(
@@ -1099,6 +1877,41 @@ class ExecutionGrantClaimsPreparerTest {
                 EVALUATED_AT,
                 APPROVAL_EXPIRES_AT,
                 state
+        );
+    }
+
+    private static GovernedAction governedActionWithId(
+            UUID actionId
+    ) {
+        return governedAction(
+                ORGANIZATION_ID,
+                AGENT_ID,
+                actionId,
+                TOOL_NAME,
+                OPERATION_NAME,
+                REQUEST_PAYLOAD_HASH
+        );
+    }
+
+    private static ApprovalRequest approvedApprovalWithAgentId(
+            UUID agentId
+    ) {
+        return new ApprovalRequest(
+                APPROVAL_REQUEST_ID,
+                ORGANIZATION_ID,
+                ACTION_ID,
+                DECISION_ID,
+                agentId,
+                TOOL_NAME,
+                OPERATION_NAME,
+                REQUEST_PAYLOAD_HASH,
+                EVALUATED_AT,
+                APPROVAL_EXPIRES_AT,
+                new ApprovalState.Approved(
+                        new ApprovalActorId("operator-subject-001"),
+                        new ApprovalRationale("Authorized for exact retry."),
+                        APPROVED_AT
+                )
         );
     }
 

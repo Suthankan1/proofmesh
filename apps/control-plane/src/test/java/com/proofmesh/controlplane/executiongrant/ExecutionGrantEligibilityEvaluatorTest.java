@@ -492,6 +492,533 @@ class ExecutionGrantEligibilityEvaluatorTest {
                 );
     }
 
+    @Test
+    void contextExactAllowWithMatchingActionDecisionIsEligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.ALLOW
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertThat(result)
+                .isInstanceOf(
+                        ExecutionGrantEligibility.Eligible.class
+                );
+    }
+
+    @Test
+    void contextActionOrganizationMismatchIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedActionWithOrganizationId(
+                                UUID.randomUUID()
+                        ),
+                        governanceDecision(
+                                DecisionOutcome.ALLOW
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .ACTION_PROVENANCE_MISMATCH
+        );
+    }
+
+    @Test
+    void contextActionIdMismatchIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedActionWithId(
+                                UUID.randomUUID()
+                        ),
+                        governanceDecision(
+                                DecisionOutcome.ALLOW
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .ACTION_PROVENANCE_MISMATCH
+        );
+    }
+
+    @Test
+    void contextDenyIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.DENY
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .DECISION_DENIED
+        );
+    }
+
+    @Test
+    void contextRequireApprovalWithValidApprovalIsEligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApproval()
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertThat(result)
+                .isInstanceOf(
+                        ExecutionGrantEligibility.Eligible.class
+                );
+    }
+
+    @Test
+    void contextRequireApprovalWithMissingApprovalIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.empty()
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_NOT_CURRENTLY_VALID
+        );
+    }
+
+    @Test
+    void contextPendingApprovalIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                pendingApproval()
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_NOT_CURRENTLY_VALID
+        );
+    }
+
+    @Test
+    void contextRejectedApprovalIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                rejectedApproval()
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_NOT_CURRENTLY_VALID
+        );
+    }
+
+    @Test
+    void contextExpiredApprovalStateIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                expiredApproval()
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        EXPIRES_AT.plusSeconds(
+                                1
+                        )
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_NOT_CURRENTLY_VALID
+        );
+    }
+
+    @Test
+    void contextHistoricalApprovedApprovalAtExpiresAtIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApproval()
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        EXPIRES_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_NOT_CURRENTLY_VALID
+        );
+    }
+
+    @Test
+    void contextHistoricalApprovedApprovalAfterExpiresAtIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApproval()
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        EXPIRES_AT.plusNanos(
+                                1
+                        )
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_NOT_CURRENTLY_VALID
+        );
+    }
+
+    @Test
+    void contextApprovalOrganizationMismatchIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApprovalWithOrganizationId(
+                                        UUID.randomUUID()
+                                )
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_PROVENANCE_MISMATCH
+        );
+    }
+
+    @Test
+    void contextApprovalAgentMismatchIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApprovalWithAgentId(
+                                        UUID.randomUUID()
+                                )
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_PROVENANCE_MISMATCH
+        );
+    }
+
+    @Test
+    void contextApprovalActionIdMismatchIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApprovalWithActionId(
+                                        UUID.randomUUID()
+                                )
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_PROVENANCE_MISMATCH
+        );
+    }
+
+    @Test
+    void contextApprovalDecisionIdMismatchIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApprovalWithDecisionId(
+                                        UUID.randomUUID()
+                                )
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_PROVENANCE_MISMATCH
+        );
+    }
+
+    @Test
+    void contextApprovalToolMismatchIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApprovalWithToolName(
+                                        new ToolName(
+                                                "github"
+                                        )
+                                )
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_PROVENANCE_MISMATCH
+        );
+    }
+
+    @Test
+    void contextApprovalOperationMismatchIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApprovalWithOperationName(
+                                        new OperationName(
+                                                "create_issue"
+                                        )
+                                )
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_PROVENANCE_MISMATCH
+        );
+    }
+
+    @Test
+    void contextApprovalPayloadHashMismatchIsIneligible() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.REQUIRE_APPROVAL
+                        ),
+                        Optional.of(
+                                approvedApprovalWithPayloadHash(
+                                        new RequestPayloadHash(
+                                                "b".repeat(
+                                                        64
+                                                )
+                                        )
+                                )
+                        )
+                );
+
+        ExecutionGrantEligibility result =
+                evaluator.evaluate(
+                        context,
+                        APPROVED_AT
+                );
+
+        assertIneligible(
+                result,
+                ExecutionGrantEligibility.Reason
+                        .APPROVAL_PROVENANCE_MISMATCH
+        );
+    }
+
+    @Test
+    void contextRejectsNullContext() {
+        assertThatThrownBy(
+                () -> evaluator.evaluate(
+                        (ExecutionGrantAuthorizationContext) null,
+                        APPROVED_AT
+                )
+        )
+                .isInstanceOf(
+                        NullPointerException.class
+                )
+                .hasMessage(
+                        "context must not be null"
+                );
+    }
+
+    @Test
+    void contextRejectsNullNow() {
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction(),
+                        governanceDecision(
+                                DecisionOutcome.ALLOW
+                        ),
+                        Optional.empty()
+                );
+
+        assertThatThrownBy(
+                () -> evaluator.evaluate(
+                        context,
+                        null
+                )
+        )
+                .isInstanceOf(
+                        NullPointerException.class
+                )
+                .hasMessage(
+                        "now must not be null"
+                );
+    }
+
     private static void assertIneligible(
             ExecutionGrantEligibility result,
             ExecutionGrantEligibility.Reason reason
@@ -806,6 +1333,156 @@ class ExecutionGrantEligibilityEvaluatorTest {
                 TOOL_NAME,
                 OPERATION_NAME,
                 REQUEST_PAYLOAD_HASH,
+                EVALUATED_AT,
+                EXPIRES_AT,
+                state
+        );
+    }
+
+    private static ApprovalRequest approvedApprovalWithOrganizationId(
+            UUID organizationId
+    ) {
+        return approvalRequest(
+                APPROVAL_REQUEST_ID,
+                organizationId,
+                ACTION_ID,
+                DECISION_ID,
+                AGENT_ID,
+                TOOL_NAME,
+                OPERATION_NAME,
+                REQUEST_PAYLOAD_HASH,
+                approvedState()
+        );
+    }
+
+    private static ApprovalRequest approvedApprovalWithAgentId(
+            UUID agentId
+    ) {
+        return approvalRequest(
+                APPROVAL_REQUEST_ID,
+                ORGANIZATION_ID,
+                ACTION_ID,
+                DECISION_ID,
+                agentId,
+                TOOL_NAME,
+                OPERATION_NAME,
+                REQUEST_PAYLOAD_HASH,
+                approvedState()
+        );
+    }
+
+    private static ApprovalRequest approvedApprovalWithActionId(
+            UUID actionId
+    ) {
+        return approvalRequest(
+                APPROVAL_REQUEST_ID,
+                ORGANIZATION_ID,
+                actionId,
+                DECISION_ID,
+                AGENT_ID,
+                TOOL_NAME,
+                OPERATION_NAME,
+                REQUEST_PAYLOAD_HASH,
+                approvedState()
+        );
+    }
+
+    private static ApprovalRequest approvedApprovalWithDecisionId(
+            UUID decisionId
+    ) {
+        return approvalRequest(
+                APPROVAL_REQUEST_ID,
+                ORGANIZATION_ID,
+                ACTION_ID,
+                decisionId,
+                AGENT_ID,
+                TOOL_NAME,
+                OPERATION_NAME,
+                REQUEST_PAYLOAD_HASH,
+                approvedState()
+        );
+    }
+
+    private static ApprovalRequest approvedApprovalWithToolName(
+            ToolName toolName
+    ) {
+        return approvalRequest(
+                APPROVAL_REQUEST_ID,
+                ORGANIZATION_ID,
+                ACTION_ID,
+                DECISION_ID,
+                AGENT_ID,
+                toolName,
+                OPERATION_NAME,
+                REQUEST_PAYLOAD_HASH,
+                approvedState()
+        );
+    }
+
+    private static ApprovalRequest approvedApprovalWithOperationName(
+            OperationName operationName
+    ) {
+        return approvalRequest(
+                APPROVAL_REQUEST_ID,
+                ORGANIZATION_ID,
+                ACTION_ID,
+                DECISION_ID,
+                AGENT_ID,
+                TOOL_NAME,
+                operationName,
+                REQUEST_PAYLOAD_HASH,
+                approvedState()
+        );
+    }
+
+    private static ApprovalRequest approvedApprovalWithPayloadHash(
+            RequestPayloadHash requestPayloadHash
+    ) {
+        return approvalRequest(
+                APPROVAL_REQUEST_ID,
+                ORGANIZATION_ID,
+                ACTION_ID,
+                DECISION_ID,
+                AGENT_ID,
+                TOOL_NAME,
+                OPERATION_NAME,
+                requestPayloadHash,
+                approvedState()
+        );
+    }
+
+    private static ApprovalState.Approved approvedState() {
+        return new ApprovalState.Approved(
+                new ApprovalActorId(
+                        "operator-subject-001"
+                ),
+                new ApprovalRationale(
+                        "Reviewed and authorized for exact runtime retry."
+                ),
+                APPROVED_AT
+        );
+    }
+
+    private static ApprovalRequest approvalRequest(
+            UUID approvalRequestId,
+            UUID organizationId,
+            UUID actionId,
+            UUID decisionId,
+            UUID agentId,
+            ToolName toolName,
+            OperationName operationName,
+            RequestPayloadHash requestPayloadHash,
+            ApprovalState state
+    ) {
+        return new ApprovalRequest(
+                approvalRequestId,
+                organizationId,
+                actionId,
+                decisionId,
+                agentId,
+                toolName,
+                operationName,
+                requestPayloadHash,
                 EVALUATED_AT,
                 EXPIRES_AT,
                 state

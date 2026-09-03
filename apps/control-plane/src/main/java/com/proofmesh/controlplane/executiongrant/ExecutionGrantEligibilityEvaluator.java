@@ -7,8 +7,58 @@ import com.proofmesh.controlplane.runtimegovernance.RuntimeGovernanceResult;
 
 import java.time.Instant;
 import java.util.Objects;
+import java.util.Optional;
 
 public class ExecutionGrantEligibilityEvaluator {
+
+    public ExecutionGrantEligibility evaluate(
+            ExecutionGrantAuthorizationContext context,
+            Instant now
+    ) {
+        Objects.requireNonNull(
+                context,
+                "context must not be null"
+        );
+
+        Objects.requireNonNull(
+                now,
+                "now must not be null"
+        );
+
+        GovernedAction action =
+                context.governedAction();
+        GovernanceDecision decision =
+                context.governanceDecision();
+
+        if (!matchesActionProvenance(
+                action,
+                decision
+        )) {
+            return ineligible(
+                    ExecutionGrantEligibility.Reason
+                            .ACTION_PROVENANCE_MISMATCH
+            );
+        }
+
+        return switch (decision.outcome()) {
+            case DENY ->
+                    ineligible(
+                            ExecutionGrantEligibility.Reason
+                                    .DECISION_DENIED
+                    );
+
+            case ALLOW ->
+                    new ExecutionGrantEligibility.Eligible();
+
+            case REQUIRE_APPROVAL ->
+                    evaluateApproval(
+                            action,
+                            decision,
+                            context.approvalRequest(),
+                            now
+                    );
+        };
+    }
 
     public ExecutionGrantEligibility evaluate(
             GovernedAction governedAction,
@@ -51,7 +101,7 @@ public class ExecutionGrantEligibilityEvaluator {
             RuntimeGovernanceResult.Governed governed,
             Instant now
     ) {
-        if (!matchesActionProvenance(
+        if (!matchesLegacyPolicyBindingProvenance(
                 governedAction,
                 governed
         )) {
@@ -61,48 +111,28 @@ public class ExecutionGrantEligibilityEvaluator {
             );
         }
 
-        GovernanceDecision decision =
-                governed.decision();
+        ExecutionGrantAuthorizationContext context =
+                new ExecutionGrantAuthorizationContext(
+                        governedAction,
+                        governed.decision(),
+                        governed.approvalRequest()
+                );
 
-        return switch (decision.outcome()) {
-            case DENY ->
-                    ineligible(
-                            ExecutionGrantEligibility.Reason
-                                    .DECISION_DENIED
-                    );
-
-            case ALLOW ->
-                    new ExecutionGrantEligibility.Eligible();
-
-            case REQUIRE_APPROVAL ->
-                    evaluateApproval(
-                            governedAction,
-                            governed,
-                            now
-                    );
-        };
+        return evaluate(
+                context,
+                now
+        );
     }
 
-    private boolean matchesActionProvenance(
+    private boolean matchesLegacyPolicyBindingProvenance(
             GovernedAction governedAction,
             RuntimeGovernanceResult.Governed governed
     ) {
-        GovernanceDecision decision =
-                governed.decision();
-
         return governedAction.organizationId()
                 .equals(
-                        decision.organizationId()
+                        governed.policyBinding()
+                                .organizationId()
                 )
-                && governedAction.id()
-                        .equals(
-                                decision.governedActionId()
-                        )
-                && governedAction.organizationId()
-                        .equals(
-                                governed.policyBinding()
-                                        .organizationId()
-                        )
                 && governedAction.agentId()
                         .equals(
                                 governed.policyBinding()
@@ -110,18 +140,35 @@ public class ExecutionGrantEligibilityEvaluator {
                         );
     }
 
+    private boolean matchesActionProvenance(
+            GovernedAction action,
+            GovernanceDecision decision
+    ) {
+        return action.organizationId()
+                .equals(
+                        decision.organizationId()
+                )
+                && action.id()
+                        .equals(
+                                decision.governedActionId()
+                        );
+    }
+
     private ExecutionGrantEligibility evaluateApproval(
-            GovernedAction governedAction,
-            RuntimeGovernanceResult.Governed governed,
+            GovernedAction action,
+            GovernanceDecision decision,
+            Optional<ApprovalRequest> approvalRequestOpt,
             Instant now
     ) {
+        if (approvalRequestOpt.isEmpty()) {
+            return ineligible(
+                    ExecutionGrantEligibility.Reason
+                            .APPROVAL_NOT_CURRENTLY_VALID
+            );
+        }
+
         ApprovalRequest approvalRequest =
-                governed.approvalRequest()
-                        .orElseThrow(
-                                () -> new IllegalStateException(
-                                        "REQUIRE_APPROVAL governance result must have an approval request"
-                                )
-                        );
+                approvalRequestOpt.get();
 
         if (!approvalRequest.isApprovedAndValidAt(
                 now
@@ -133,7 +180,8 @@ public class ExecutionGrantEligibilityEvaluator {
         }
 
         if (!matchesApprovalProvenance(
-                governedAction,
+                action,
+                decision,
                 approvalRequest
         )) {
             return ineligible(
@@ -146,20 +194,45 @@ public class ExecutionGrantEligibilityEvaluator {
     }
 
     private boolean matchesApprovalProvenance(
-            GovernedAction governedAction,
-            ApprovalRequest approvalRequest
+            GovernedAction action,
+            GovernanceDecision decision,
+            ApprovalRequest approval
     ) {
-        return approvalRequest.toolName()
+        return approval.organizationId()
                 .equals(
-                        governedAction.toolName()
+                        action.organizationId()
                 )
-                && approvalRequest.operationName()
+                && approval.organizationId()
                         .equals(
-                                governedAction.operationName()
+                                decision.organizationId()
                         )
-                && approvalRequest.requestPayloadHash()
+                && approval.agentId()
                         .equals(
-                                governedAction.requestPayloadHash()
+                                action.agentId()
+                        )
+                && approval.governedActionId()
+                        .equals(
+                                action.id()
+                        )
+                && approval.governedActionId()
+                        .equals(
+                                decision.governedActionId()
+                        )
+                && approval.governanceDecisionId()
+                        .equals(
+                                decision.id()
+                        )
+                && approval.toolName()
+                        .equals(
+                                action.toolName()
+                        )
+                && approval.operationName()
+                        .equals(
+                                action.operationName()
+                        )
+                && approval.requestPayloadHash()
+                        .equals(
+                                action.requestPayloadHash()
                         );
     }
 
