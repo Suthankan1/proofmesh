@@ -41,3 +41,9 @@ management:
 
 server:
   shutdown: graceful
+
+proofmesh:
+  execution-grant:
+    issuer: ${PROOFMESH_EXECUTION_GRANT_ISSUER:proofmesh-control-plane}
+    audience: ${PROOFMESH_EXECUTION_GRANT_AUDIENCE:proofmesh-gateway}
+    grant-ttl: ${PROOFMESH_EXECUTION_GRANT_TTL:30s}
