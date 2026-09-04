@@ -47,3 +47,8 @@ proofmesh:
     issuer: ${PROOFMESH_EXECUTION_GRANT_ISSUER:proofmesh-control-plane}
     audience: ${PROOFMESH_EXECUTION_GRANT_AUDIENCE:proofmesh-gateway}
     grant-ttl: ${PROOFMESH_EXECUTION_GRANT_TTL:30s}
+    signing:
+      enabled: ${PROOFMESH_EXECUTION_GRANT_SIGNING_ENABLED:false}
+      key-id: ${PROOFMESH_EXECUTION_GRANT_SIGNING_KEY_ID:}
+      private-key-path: ${PROOFMESH_EXECUTION_GRANT_SIGNING_PRIVATE_KEY_PATH:}
+      public-key-path: ${PROOFMESH_EXECUTION_GRANT_SIGNING_PUBLIC_KEY_PATH:}
