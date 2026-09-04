@@ -49,8 +49,10 @@ class ExecutionGrantSigningConfigurationTest {
         baseRunner().run(context -> {
             assertThat(context).hasNotFailed();
 
-            // 1. no ExecutionGrantSigningKeyProvider
+            // 1. no ExecutionGrantSigningKeyProvider or ExecutionGrantPublicKeyProvider
             assertThat(context).doesNotHaveBean(ExecutionGrantSigningKeyProvider.class);
+            assertThat(context).doesNotHaveBean(ExecutionGrantPublicKeyProvider.class);
+            assertThat(context).doesNotHaveBean(FileBasedExecutionGrantKeyProvider.class);
 
             // 2. no ExecutionGrantIssuer
             assertThat(context).doesNotHaveBean(ExecutionGrantIssuer.class);
@@ -75,6 +77,8 @@ class ExecutionGrantSigningConfigurationTest {
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).doesNotHaveBean(ExecutionGrantSigningKeyProvider.class);
+                    assertThat(context).doesNotHaveBean(ExecutionGrantPublicKeyProvider.class);
+                    assertThat(context).doesNotHaveBean(FileBasedExecutionGrantKeyProvider.class);
                     assertThat(context).doesNotHaveBean(ExecutionGrantIssuer.class);
                 });
     }
@@ -98,12 +102,23 @@ class ExecutionGrantSigningConfigurationTest {
                 .run(context -> {
                     assertThat(context).hasNotFailed();
 
-                    // exactly one signing-key provider
+                    // exactly one provider satisfying both interfaces
                     assertThat(context).hasSingleBean(ExecutionGrantSigningKeyProvider.class);
-                    ExecutionGrantSigningKeyProvider provider =
+                    assertThat(context).hasSingleBean(ExecutionGrantPublicKeyProvider.class);
+                    assertThat(context).hasSingleBean(FileBasedExecutionGrantKeyProvider.class);
+
+                    ExecutionGrantSigningKeyProvider signingKeyProvider =
                             context.getBean(ExecutionGrantSigningKeyProvider.class);
-                    assertThat(provider).isInstanceOf(FileBasedExecutionGrantKeyProvider.class);
-                    assertThat(provider.activeSigningKey().keyId()).isEqualTo("prod-key-1");
+                    ExecutionGrantPublicKeyProvider publicKeyProvider =
+                            context.getBean(ExecutionGrantPublicKeyProvider.class);
+                    FileBasedExecutionGrantKeyProvider concreteProvider =
+                            context.getBean(FileBasedExecutionGrantKeyProvider.class);
+
+                    assertThat(signingKeyProvider).isSameAs(concreteProvider);
+                    assertThat(publicKeyProvider).isSameAs(concreteProvider);
+                    assertThat(signingKeyProvider.activeSigningKey().keyId()).isEqualTo("prod-key-1");
+                    assertThat(publicKeyProvider.activeKeyId()).isEqualTo("prod-key-1");
+                    assertThat(publicKeyProvider.activePublicKey()).isNotNull();
 
                     // exactly one issuer
                     assertThat(context).hasSingleBean(ExecutionGrantIssuer.class);

@@ -32,7 +32,8 @@ class SecurityConfiguration {
                                 "/actuator/health",
                                 "/actuator/health/**",
                                 "/actuator/info",
-                                "/error"
+                                "/error",
+                                "/.well-known/jwks.json"
                         ).permitAll()
 
                         .requestMatchers("/api/**").authenticated()

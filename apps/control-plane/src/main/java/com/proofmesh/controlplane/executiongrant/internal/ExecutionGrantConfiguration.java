@@ -80,7 +80,7 @@ class ExecutionGrantConfiguration {
             name = "enabled",
             havingValue = "true"
     )
-    ExecutionGrantSigningKeyProvider executionGrantSigningKeyProvider(
+    FileBasedExecutionGrantKeyProvider executionGrantSigningKeyProvider(
             ExecutionGrantSigningProperties properties
     ) {
         return new FileBasedExecutionGrantKeyProvider(properties);

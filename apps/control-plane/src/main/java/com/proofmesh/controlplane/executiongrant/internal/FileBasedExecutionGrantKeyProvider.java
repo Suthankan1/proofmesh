@@ -19,7 +19,8 @@ import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.Objects;
 
-final class FileBasedExecutionGrantKeyProvider implements ExecutionGrantSigningKeyProvider {
+final class FileBasedExecutionGrantKeyProvider
+        implements ExecutionGrantSigningKeyProvider, ExecutionGrantPublicKeyProvider {
 
     private static final String TEST_PAYLOAD = "proofmesh-execution-grant-key-self-test";
 
@@ -74,11 +75,13 @@ final class FileBasedExecutionGrantKeyProvider implements ExecutionGrantSigningK
         return signingKey;
     }
 
-    String activeKeyId() {
+    @Override
+    public String activeKeyId() {
         return signingKey.keyId();
     }
 
-    ECPublicKey activePublicKey() {
+    @Override
+    public ECPublicKey activePublicKey() {
         return publicKey;
     }
 
