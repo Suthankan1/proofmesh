@@ -32,3 +32,27 @@ jobs:
         run: |
           chmod +x mvnw
           ./mvnw --batch-mode --no-transfer-progress clean verify
+
+  gateway:
+    name: Gateway
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: apps/gateway
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: apps/gateway/go.mod
+          cache-dependency-path: apps/gateway/go.sum
+
+      - name: Verify
+        run: |
+          go mod verify
+          go vet ./...
+          go test -race ./...
