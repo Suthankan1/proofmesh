@@ -6,6 +6,9 @@ var (
 	// ErrNilVerifier indicates the enforcer was constructed with a nil verifier.
 	ErrNilVerifier = errors.New("pep: verifier must not be nil")
 
+	// ErrNilAuthority indicates the enforcer was constructed with a nil execution authority.
+	ErrNilAuthority = errors.New("pep: authority must not be nil")
+
 	// ErrNilExecutor indicates the enforcer was constructed with a nil tool executor.
 	ErrNilExecutor = errors.New("pep: executor must not be nil")
 
@@ -26,6 +29,15 @@ var (
 
 	// ErrExecutionGrantExpired indicates that the grant has expired at the execution boundary.
 	ErrExecutionGrantExpired = errors.New("pep: execution grant expired")
+
+	// ErrExecutionAuthorityFailed indicates that the execution authority failed or returned an invalid result.
+	ErrExecutionAuthorityFailed = errors.New("pep: execution authority failed")
+
+	// ErrExecutionReplay indicates that the execution grant has already been claimed and admitted.
+	ErrExecutionReplay = errors.New("pep: execution replay detected")
+
+	// ErrExecutionCanceled indicates that execution was canceled via context.
+	ErrExecutionCanceled = errors.New("pep: execution canceled")
 
 	// ErrToolExecutionFailed indicates that downstream tool execution failed.
 	ErrToolExecutionFailed = errors.New("pep: tool execution failed")

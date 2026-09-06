@@ -22,20 +22,29 @@ var _ GrantVerifier = (*executiongrant.Verifier)(nil)
 
 // Enforcer is the core Policy Enforcement Point (PEP) orchestrator for protected tool execution.
 // It strictly orchestrates token verification, exact attempt binding, bound-object sanity validation,
-// and execution-boundary expiry checking before invoking the injected ToolExecutor.
+// pre-claim expiry and context checks, atomic single-use replay admission claim,
+// and post-claim context and expiry checks, before invoking the injected ToolExecutor.
 //
-// Replay authority and persistence are intentionally absent in this slice (deferred to 08B).
-// Real protected-tool side effects must NOT be enabled before replay authority exists.
+// Real protected-tool side effects must NOT be enabled before durable replay authority exists.
 type Enforcer struct {
-	verifier GrantVerifier
-	executor ToolExecutor
-	clock    executiongrant.Clock
+	verifier  GrantVerifier
+	authority ExecutionAuthority
+	executor  ToolExecutor
+	clock     executiongrant.Clock
 }
 
 // NewEnforcer constructs a new Enforcer with explicit non-nil dependency injection.
-func NewEnforcer(verifier GrantVerifier, executor ToolExecutor, clock executiongrant.Clock) (*Enforcer, error) {
+func NewEnforcer(
+	verifier GrantVerifier,
+	authority ExecutionAuthority,
+	executor ToolExecutor,
+	clock executiongrant.Clock,
+) (*Enforcer, error) {
 	if verifier == nil {
 		return nil, ErrNilVerifier
+	}
+	if authority == nil {
+		return nil, ErrNilAuthority
 	}
 	if executor == nil {
 		return nil, ErrNilExecutor
@@ -44,9 +53,10 @@ func NewEnforcer(verifier GrantVerifier, executor ToolExecutor, clock executiong
 		return nil, ErrNilClock
 	}
 	return &Enforcer{
-		verifier: verifier,
-		executor: executor,
-		clock:    clock,
+		verifier:  verifier,
+		authority: authority,
+		executor:  executor,
+		clock:     clock,
 	}, nil
 }
 
@@ -56,17 +66,23 @@ func NewEnforcer(verifier GrantVerifier, executor ToolExecutor, clock executiong
 //  2. Verify untrusted compact token via injected GrantVerifier.
 //  3. Bind untrusted ExecutionAttempt to verified grant via executionattempt.Bind.
 //  4. Defensively validate bound object sanity and non-zero invariants.
-//  5. Check strict execution-boundary expiration (now < bound.ExpiresAt()).
-//  6. Construct immutable BoundToolCall carrying canonical payload and verified metadata.
-//  7. Invoke injected ToolExecutor.
+//  5. Check pre-claim strict execution-boundary expiration (now < bound.ExpiresAt()).
+//  6. Check pre-claim context cancellation (ctx.Err() == nil).
+//  7. Construct immutable BoundToolCall carrying canonical payload and verified metadata.
+//  8. Claim atomic single-use execution authority via ExecutionAuthority.
+//  9. Interpret claim result (ClaimAcquired required to proceed).
 //
-// If any step prior to step 7 fails, the ToolExecutor is NEVER invoked.
+// 10. Check post-claim context cancellation (ctx.Err() == nil).
+// 11. Check post-claim strict execution-boundary expiration (now < call.ExpiresAt()).
+// 12. Invoke injected ToolExecutor.
+//
+// If any step prior to step 12 fails, the ToolExecutor is NEVER invoked.
 func (e *Enforcer) Execute(
 	ctx context.Context,
 	compactToken string,
 	attempt executionattempt.ExecutionAttempt,
 ) (ToolResult, error) {
-	if e == nil || e.verifier == nil || e.executor == nil || e.clock == nil {
+	if e == nil || e.verifier == nil || e.authority == nil || e.executor == nil || e.clock == nil {
 		return ToolResult{}, ErrInvalidEnforcer
 	}
 
@@ -87,13 +103,18 @@ func (e *Enforcer) Execute(
 		return ToolResult{}, err
 	}
 
-	// 4. Strict execution-boundary expiry check immediately before tool invocation
+	// 4. Pre-claim strict execution-boundary expiry check
 	now := e.clock.Now().UTC()
 	if !now.Before(bound.ExpiresAt().UTC()) {
 		return ToolResult{}, ErrExecutionGrantExpired
 	}
 
-	// 5. Construct immutable BoundToolCall from bound object ONLY (never from untrusted attempt)
+	// 5. Pre-claim context cancellation check
+	if ctx.Err() != nil {
+		return ToolResult{}, ErrExecutionCanceled
+	}
+
+	// 6. Construct immutable BoundToolCall from bound object ONLY (never from untrusted attempt)
 	call := BoundToolCall{
 		grantID:              bound.GrantID(),
 		organizationID:       bound.OrganizationID(),
@@ -107,7 +128,33 @@ func (e *Enforcer) Execute(
 		payload:              bound.Payload(), // defensive clone of RFC 8785 canonical bytes
 	}
 
-	// 6. Invoke downstream tool executor
+	// 7. Atomic replay-admission claim against ExecutionAuthority
+	claimResult, err := e.authority.Claim(ctx, call)
+	if err != nil {
+		return ToolResult{}, ErrExecutionAuthorityFailed
+	}
+
+	switch claimResult {
+	case ClaimAcquired:
+		// Succeeded: proceed toward execution
+	case ClaimReplay:
+		return ToolResult{}, ErrExecutionReplay
+	default:
+		return ToolResult{}, ErrExecutionAuthorityFailed
+	}
+
+	// 8. Post-claim context cancellation check
+	if ctx.Err() != nil {
+		return ToolResult{}, ErrExecutionCanceled
+	}
+
+	// 9. Post-claim strict execution-boundary expiry check
+	now = e.clock.Now().UTC()
+	if !now.Before(call.ExpiresAt().UTC()) {
+		return ToolResult{}, ErrExecutionGrantExpired
+	}
+
+	// 10. Invoke downstream tool executor exactly once
 	res, err := e.executor.Execute(ctx, call)
 	if err != nil {
 		return ToolResult{}, ErrToolExecutionFailed

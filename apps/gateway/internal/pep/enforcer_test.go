@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -48,6 +49,75 @@ func (f *fakeVerifier) Verify(ctx context.Context, compactToken string) (executi
 		return executiongrant.VerifiedExecutionGrant{}, f.returnErr
 	}
 	return f.returnGrant, nil
+}
+
+type fakeAuthority struct {
+	mu                sync.Mutex
+	calls             int
+	lastCall          pep.BoundToolCall
+	lastCtx           context.Context
+	claimedGrants     map[uuid.UUID]struct{}
+	hasScriptedResult bool
+	scriptedResult    pep.ClaimResult
+	scriptedErr       error
+	hookBeforeFn      func()
+	hookAfterFn       func()
+	cancelCtxOnClaim  context.CancelFunc
+}
+
+func newFakeAuthority() *fakeAuthority {
+	return &fakeAuthority{
+		claimedGrants: make(map[uuid.UUID]struct{}),
+	}
+}
+
+func (f *fakeAuthority) Claim(ctx context.Context, call pep.BoundToolCall) (pep.ClaimResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.lastCall = call
+	f.lastCtx = ctx
+
+	if f.hookBeforeFn != nil {
+		f.hookBeforeFn()
+	}
+
+	if f.scriptedErr != nil {
+		result := pep.ClaimResultUnknown
+		if f.hasScriptedResult {
+			result = f.scriptedResult
+		}
+		return result, f.scriptedErr
+	}
+
+	if f.hasScriptedResult {
+		if f.cancelCtxOnClaim != nil {
+			f.cancelCtxOnClaim()
+		}
+		if f.hookAfterFn != nil {
+			f.hookAfterFn()
+		}
+		return f.scriptedResult, nil
+	}
+
+	if f.claimedGrants == nil {
+		f.claimedGrants = make(map[uuid.UUID]struct{})
+	}
+
+	if _, exists := f.claimedGrants[call.GrantID()]; exists {
+		return pep.ClaimReplay, nil
+	}
+
+	f.claimedGrants[call.GrantID()] = struct{}{}
+
+	if f.cancelCtxOnClaim != nil {
+		f.cancelCtxOnClaim()
+	}
+	if f.hookAfterFn != nil {
+		f.hookAfterFn()
+	}
+
+	return pep.ClaimAcquired, nil
 }
 
 type recordingExecutor struct {
@@ -167,12 +237,14 @@ func TestNewEnforcer_Validation(t *testing.T) {
 	t.Parallel()
 
 	verifier := &fakeVerifier{}
+	authority := newFakeAuthority()
 	executor := &recordingExecutor{}
 	clock := &controllableClock{now: time.Now().UTC()}
 
 	tests := []struct {
 		name        string
 		verifier    pep.GrantVerifier
+		authority   pep.ExecutionAuthority
 		executor    pep.ToolExecutor
 		clock       executiongrant.Clock
 		expectedErr error
@@ -180,13 +252,23 @@ func TestNewEnforcer_Validation(t *testing.T) {
 		{
 			name:        "nil verifier",
 			verifier:    nil,
+			authority:   authority,
 			executor:    executor,
 			clock:       clock,
 			expectedErr: pep.ErrNilVerifier,
 		},
 		{
+			name:        "nil authority",
+			verifier:    verifier,
+			authority:   nil,
+			executor:    executor,
+			clock:       clock,
+			expectedErr: pep.ErrNilAuthority,
+		},
+		{
 			name:        "nil executor",
 			verifier:    verifier,
+			authority:   authority,
 			executor:    nil,
 			clock:       clock,
 			expectedErr: pep.ErrNilExecutor,
@@ -194,6 +276,7 @@ func TestNewEnforcer_Validation(t *testing.T) {
 		{
 			name:        "nil clock",
 			verifier:    verifier,
+			authority:   authority,
 			executor:    executor,
 			clock:       nil,
 			expectedErr: pep.ErrNilClock,
@@ -201,6 +284,7 @@ func TestNewEnforcer_Validation(t *testing.T) {
 		{
 			name:        "valid dependencies",
 			verifier:    verifier,
+			authority:   authority,
 			executor:    executor,
 			clock:       clock,
 			expectedErr: nil,
@@ -211,7 +295,7 @@ func TestNewEnforcer_Validation(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			enforcer, err := pep.NewEnforcer(tc.verifier, tc.executor, tc.clock)
+			enforcer, err := pep.NewEnforcer(tc.verifier, tc.authority, tc.executor, tc.clock)
 			if tc.expectedErr != nil {
 				if !errors.Is(err, tc.expectedErr) {
 					t.Fatalf("expected error %v, got %v", tc.expectedErr, err)
@@ -257,11 +341,12 @@ func TestEnforcer_Execute_PositivePath(t *testing.T) {
 	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
 
 	verifier := &fakeVerifier{returnGrant: grant}
+	authority := newFakeAuthority()
 	executor := &recordingExecutor{
 		returnRes: pep.ToolResult{Payload: []byte(`{"status":"payment_processed"}`)},
 	}
 
-	enforcer, err := pep.NewEnforcer(verifier, executor, clock)
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
 	if err != nil {
 		t.Fatalf("NewEnforcer failed: %v", err)
 	}
@@ -286,7 +371,25 @@ func TestEnforcer_Execute_PositivePath(t *testing.T) {
 		t.Fatal("expected caller ctx passed to verifier")
 	}
 
-	// 2. Executor called exactly once with exact context
+	// 2. Authority called exactly once with exact context and bound call
+	if authority.calls != 1 {
+		t.Fatalf("expected authority calls == 1, got %d", authority.calls)
+	}
+	if authority.lastCtx != ctx {
+		t.Fatal("expected caller ctx passed to authority")
+	}
+	authCall := authority.lastCall
+	if authCall.GrantID() != grant.GrantID {
+		t.Errorf("Authority GrantID mismatch: got %s, want %s", authCall.GrantID(), grant.GrantID)
+	}
+	if authCall.ToolName() != grant.ToolName {
+		t.Errorf("Authority ToolName mismatch: got %s, want %s", authCall.ToolName(), grant.ToolName)
+	}
+	if !bytes.Equal(authCall.Payload(), canonicalPayload) {
+		t.Fatalf("Authority expected canonical payload %s, got %s", canonicalPayload, authCall.Payload())
+	}
+
+	// 3. Executor called exactly once with exact context
 	if executor.calls != 1 {
 		t.Fatalf("expected executor calls == 1, got %d", executor.calls)
 	}
@@ -294,7 +397,7 @@ func TestEnforcer_Execute_PositivePath(t *testing.T) {
 		t.Fatal("expected caller ctx passed to executor")
 	}
 
-	// 3. Executor received metadata strictly from verified grant / bound object
+	// 4. Executor received metadata strictly from verified grant / bound object
 	call := executor.lastCall
 	if call.GrantID() != grant.GrantID {
 		t.Errorf("GrantID mismatch: got %s, want %s", call.GrantID(), grant.GrantID)
@@ -324,15 +427,399 @@ func TestEnforcer_Execute_PositivePath(t *testing.T) {
 		t.Errorf("ExpiresAt mismatch: got %s, want %s", call.ExpiresAt(), grant.ExpiresAt)
 	}
 
-	// 4. Executor received RFC 8785 canonical payload bytes (not unformatted attempt payload)
+	// 5. Executor received RFC 8785 canonical payload bytes (not unformatted attempt payload)
 	if !bytes.Equal(call.Payload(), canonicalPayload) {
 		t.Fatalf("expected canonical payload %s, got %s", canonicalPayload, call.Payload())
 	}
 
-	// 5. Result payload propagated accurately
+	// 6. Result payload propagated accurately
 	expectedRes := []byte(`{"status":"payment_processed"}`)
 	if !bytes.Equal(res.Payload, expectedRes) {
 		t.Fatalf("expected result %s, got %s", expectedRes, res.Payload)
+	}
+}
+
+func TestEnforcer_Execute_ReplayRejection(t *testing.T) {
+	t.Parallel()
+
+	grant, attempt, _, _, _ := newValidTestFixtures()
+	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
+
+	verifier := &fakeVerifier{returnGrant: grant}
+	authority := newFakeAuthority()
+	executor := &recordingExecutor{
+		returnRes: pep.ToolResult{Payload: []byte(`{"status":"ok"}`)},
+	}
+
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
+	if err != nil {
+		t.Fatalf("NewEnforcer failed: %v", err)
+	}
+
+	token := "token.valid"
+
+	// First execution: ACQUIRED -> executor executes
+	res1, err := enforcer.Execute(context.Background(), token, attempt)
+	if err != nil {
+		t.Fatalf("first execution failed unexpectedly: %v", err)
+	}
+	if !bytes.Equal(res1.Payload, []byte(`{"status":"ok"}`)) {
+		t.Fatalf("unexpected first result: %s", res1.Payload)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("expected executor calls == 1 after first call, got %d", executor.calls)
+	}
+	if authority.calls != 1 {
+		t.Fatalf("expected authority calls == 1 after first call, got %d", authority.calls)
+	}
+
+	// Second execution with exact same token + attempt + GrantID: REPLAY -> denied
+	res2, err := enforcer.Execute(context.Background(), token, attempt)
+	if !errors.Is(err, pep.ErrExecutionReplay) {
+		t.Fatalf("expected ErrExecutionReplay on second attempt, got %v", err)
+	}
+	if len(res2.Payload) != 0 {
+		t.Fatalf("expected empty result payload on replay, got %s", res2.Payload)
+	}
+
+	// Invariants:
+	// Executor MUST NOT have been called again (total calls remains 1)
+	if executor.calls != 1 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called %d times; expected exactly 1 on replay", executor.calls)
+	}
+	// Authority called twice (once per attempt)
+	if authority.calls != 2 {
+		t.Fatalf("expected authority calls == 2, got %d", authority.calls)
+	}
+}
+
+func TestEnforcer_Execute_FreshGrantIDRetryAllowed(t *testing.T) {
+	t.Parallel()
+
+	grant1, attempt, _, _, _ := newValidTestFixtures()
+	clock := &controllableClock{now: grant1.ExpiresAt.Add(-10 * time.Second)}
+
+	grant2 := grant1
+	grant2.GrantID = uuid.New() // Fresh grant ID (jti) for retry
+
+	verifier := &fakeVerifier{returnGrant: grant1}
+	authority := newFakeAuthority()
+	executor := &recordingExecutor{
+		returnRes: pep.ToolResult{Payload: []byte(`{"status":"ok"}`)},
+	}
+
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
+	if err != nil {
+		t.Fatalf("NewEnforcer failed: %v", err)
+	}
+
+	// First execution with grant1
+	_, err = enforcer.Execute(context.Background(), "token1", attempt)
+	if err != nil {
+		t.Fatalf("first execution failed: %v", err)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("expected executor calls == 1, got %d", executor.calls)
+	}
+
+	// Retry with fresh grant2 (different jti, but identical action/payload)
+	verifier.mu.Lock()
+	verifier.returnGrant = grant2
+	verifier.mu.Unlock()
+
+	_, err = enforcer.Execute(context.Background(), "token2", attempt)
+	if err != nil {
+		t.Fatalf("retry with fresh grant ID failed unexpectedly: %v", err)
+	}
+
+	if executor.calls != 2 {
+		t.Fatalf("expected executor calls == 2 with fresh grant ID, got %d", executor.calls)
+	}
+	if authority.calls != 2 {
+		t.Fatalf("expected authority calls == 2, got %d", authority.calls)
+	}
+}
+
+func TestEnforcer_Execute_ExecutorFailureConsumesClaim(t *testing.T) {
+	t.Parallel()
+
+	grant, attempt, _, _, _ := newValidTestFixtures()
+	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
+
+	verifier := &fakeVerifier{returnGrant: grant}
+	authority := newFakeAuthority()
+	executor := &recordingExecutor{
+		returnErr: errors.New("downstream tool crashed after side effect"),
+	}
+
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
+	if err != nil {
+		t.Fatalf("NewEnforcer failed: %v", err)
+	}
+
+	// First execution: ACQUIRED, executor called and returns error
+	_, err = enforcer.Execute(context.Background(), "token", attempt)
+	if !errors.Is(err, pep.ErrToolExecutionFailed) {
+		t.Fatalf("expected ErrToolExecutionFailed, got %v", err)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("expected executor calls == 1, got %d", executor.calls)
+	}
+	if authority.calls != 1 {
+		t.Fatalf("expected authority calls == 1, got %d", authority.calls)
+	}
+
+	// Second execution with same GrantID: MUST be REPLAY even though executor failed
+	_, err = enforcer.Execute(context.Background(), "token", attempt)
+	if !errors.Is(err, pep.ErrExecutionReplay) {
+		t.Fatalf("expected ErrExecutionReplay on retry after executor failure, got %v", err)
+	}
+
+	// Executor must NOT be called again
+	if executor.calls != 1 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called %d times; failed execution must NOT unclaim grant", executor.calls)
+	}
+	if authority.calls != 2 {
+		t.Fatalf("expected authority calls == 2, got %d", authority.calls)
+	}
+}
+
+func TestEnforcer_Execute_AuthorityUnavailable(t *testing.T) {
+	t.Parallel()
+
+	grant, attempt, _, _, _ := newValidTestFixtures()
+	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
+
+	verifier := &fakeVerifier{returnGrant: grant}
+	sensitiveCanary := "canary-postgres-connection-timeout: internal-db.cluster.local:5432"
+	authority := &fakeAuthority{
+		scriptedErr: errors.New(sensitiveCanary),
+	}
+	executor := &recordingExecutor{}
+
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
+	if err != nil {
+		t.Fatalf("NewEnforcer failed: %v", err)
+	}
+
+	res, err := enforcer.Execute(context.Background(), "token", attempt)
+	if !errors.Is(err, pep.ErrExecutionAuthorityFailed) {
+		t.Fatalf("expected ErrExecutionAuthorityFailed, got %v", err)
+	}
+	if strings.Contains(err.Error(), sensitiveCanary) ||
+		strings.Contains(fmt.Sprintf("%v", err), sensitiveCanary) ||
+		strings.Contains(fmt.Sprintf("%+v", err), sensitiveCanary) {
+		t.Fatalf("sensitive authority error canary leaked through PEP boundary: %v", err)
+	}
+	if authority.calls != 1 {
+		t.Fatalf("expected exactly 1 authority call, got %d", authority.calls)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called on authority failure: calls=%d", executor.calls)
+	}
+	if len(res.Payload) != 0 {
+		t.Fatalf("expected empty result payload, got %s", res.Payload)
+	}
+}
+
+func TestEnforcer_Execute_InvalidAuthorityResult(t *testing.T) {
+	t.Parallel()
+
+	grant, attempt, _, _, _ := newValidTestFixtures()
+	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
+
+	verifier := &fakeVerifier{returnGrant: grant}
+	authority := &fakeAuthority{
+		hasScriptedResult: true,
+		scriptedResult:    pep.ClaimResultUnknown, // unknown enum + nil error
+	}
+	executor := &recordingExecutor{}
+
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
+	if err != nil {
+		t.Fatalf("NewEnforcer failed: %v", err)
+	}
+
+	_, err = enforcer.Execute(context.Background(), "token", attempt)
+	if !errors.Is(err, pep.ErrExecutionAuthorityFailed) {
+		t.Fatalf("expected ErrExecutionAuthorityFailed for unknown claim result, got %v", err)
+	}
+	if authority.calls != 1 {
+		t.Fatalf("expected authority calls == 1, got %d", authority.calls)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called on invalid authority result: calls=%d", executor.calls)
+	}
+}
+
+func TestEnforcer_Execute_PreClaimExpiry(t *testing.T) {
+	t.Parallel()
+
+	grant, attempt, _, _, _ := newValidTestFixtures()
+	exp := grant.ExpiresAt
+
+	tests := []struct {
+		name string
+		now  time.Time
+	}{
+		{
+			name: "exactly at expiry (now == exp)",
+			now:  exp,
+		},
+		{
+			name: "after expiry (now > exp)",
+			now:  exp.Add(1 * time.Second),
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			clock := &controllableClock{now: tc.now}
+			verifier := &fakeVerifier{returnGrant: grant}
+			authority := newFakeAuthority()
+			executor := &recordingExecutor{}
+
+			enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
+			if err != nil {
+				t.Fatalf("NewEnforcer failed: %v", err)
+			}
+
+			_, err = enforcer.Execute(context.Background(), "token", attempt)
+			if !errors.Is(err, pep.ErrExecutionGrantExpired) {
+				t.Fatalf("expected ErrExecutionGrantExpired, got %v", err)
+			}
+
+			// Core Invariant: Pre-claim expired grant does NOT consume authority claim
+			if authority.calls != 0 {
+				t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: authority called %d times on pre-claim expired grant", authority.calls)
+			}
+			if executor.calls != 0 {
+				t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called %d times on pre-claim expired grant", executor.calls)
+			}
+		})
+	}
+}
+
+func TestEnforcer_Execute_ExpiryDuringClaim(t *testing.T) {
+	t.Parallel()
+
+	grant, attempt, _, _, _ := newValidTestFixtures()
+	exp := grant.ExpiresAt
+	// Pre-claim clock is 1s before expiry
+	clock := &controllableClock{now: exp.Add(-1 * time.Second)}
+
+	verifier := &fakeVerifier{returnGrant: grant}
+	authority := newFakeAuthority()
+	// When Claim is called, advance clock to exp to simulate durable claim latency
+	authority.hookAfterFn = func() {
+		clock.Set(exp)
+	}
+	executor := &recordingExecutor{}
+
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
+	if err != nil {
+		t.Fatalf("NewEnforcer failed: %v", err)
+	}
+
+	_, err = enforcer.Execute(context.Background(), "token", attempt)
+	if !errors.Is(err, pep.ErrExecutionGrantExpired) {
+		t.Fatalf("expected ErrExecutionGrantExpired when grant expires during claim, got %v", err)
+	}
+	if authority.calls != 1 {
+		t.Fatalf("expected authority calls == 1, got %d", authority.calls)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called %d times on grant expired during claim", executor.calls)
+	}
+
+	// Invariant: Claim remains consumed! Subsequent attempt with same GrantID must report REPLAY
+	// Reset clock to before expiry just to isolate the replay check
+	clock.Set(exp.Add(-10 * time.Second))
+	_, err = enforcer.Execute(context.Background(), "token", attempt)
+	if !errors.Is(err, pep.ErrExecutionReplay) {
+		t.Fatalf("expected ErrExecutionReplay on retry after post-claim expiry, got %v", err)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("executor should remain uninvoked, calls=%d", executor.calls)
+	}
+}
+
+func TestEnforcer_Execute_ContextCancellation_PreClaim(t *testing.T) {
+	t.Parallel()
+
+	grant, attempt, _, _, _ := newValidTestFixtures()
+	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Verifier cancels ctx during verification
+	verifier := &fakeVerifier{
+		returnGrant: grant,
+		hookBeforeFn: func() {
+			cancel()
+		},
+	}
+	authority := newFakeAuthority()
+	executor := &recordingExecutor{}
+
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
+	if err != nil {
+		t.Fatalf("NewEnforcer failed: %v", err)
+	}
+
+	_, err = enforcer.Execute(ctx, "token", attempt)
+	if !errors.Is(err, pep.ErrExecutionCanceled) {
+		t.Fatalf("expected ErrExecutionCanceled when context canceled before claim, got %v", err)
+	}
+	if authority.calls != 0 {
+		t.Fatalf("expected authority calls == 0 on pre-claim cancellation, got %d", authority.calls)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called on pre-claim cancellation, calls=%d", executor.calls)
+	}
+}
+
+func TestEnforcer_Execute_ContextCancellation_PostClaim(t *testing.T) {
+	t.Parallel()
+
+	grant, attempt, _, _, _ := newValidTestFixtures()
+	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	verifier := &fakeVerifier{returnGrant: grant}
+	authority := newFakeAuthority()
+	// Cancel context during Claim after acquiring
+	authority.cancelCtxOnClaim = cancel
+	executor := &recordingExecutor{}
+
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
+	if err != nil {
+		t.Fatalf("NewEnforcer failed: %v", err)
+	}
+
+	_, err = enforcer.Execute(ctx, "token", attempt)
+	if !errors.Is(err, pep.ErrExecutionCanceled) {
+		t.Fatalf("expected ErrExecutionCanceled when context canceled after claim, got %v", err)
+	}
+	if authority.calls != 1 {
+		t.Fatalf("expected authority calls == 1, got %d", authority.calls)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called on post-claim cancellation, calls=%d", executor.calls)
+	}
+
+	// Invariant: Claim remains consumed! Subsequent attempt with same GrantID must report REPLAY
+	newCtx := context.Background()
+	_, err = enforcer.Execute(newCtx, "token", attempt)
+	if !errors.Is(err, pep.ErrExecutionReplay) {
+		t.Fatalf("expected ErrExecutionReplay on retry after post-claim cancellation, got %v", err)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("executor should remain uninvoked, calls=%d", executor.calls)
 	}
 }
 
@@ -343,11 +830,12 @@ func TestEnforcer_Execute_CanonicalPayloadPreservedDespiteAttemptMutation(t *tes
 	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
 
 	verifier := &fakeVerifier{returnGrant: grant}
+	authority := newFakeAuthority()
 	executor := &recordingExecutor{
 		returnRes: pep.ToolResult{Payload: []byte(`{"ok":true}`)},
 	}
 
-	enforcer, err := pep.NewEnforcer(verifier, executor, clock)
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
 	if err != nil {
 		t.Fatalf("NewEnforcer failed: %v", err)
 	}
@@ -377,9 +865,10 @@ func TestBoundToolCall_PayloadDefensiveCopy(t *testing.T) {
 	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
 
 	verifier := &fakeVerifier{returnGrant: grant}
+	authority := newFakeAuthority()
 	executor := &recordingExecutor{}
 
-	enforcer, err := pep.NewEnforcer(verifier, executor, clock)
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
 	if err != nil {
 		t.Fatalf("NewEnforcer failed: %v", err)
 	}
@@ -418,12 +907,13 @@ func TestEnforcer_Execute_SanitizesExecutorFailure(t *testing.T) {
 	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
 
 	verifier := &fakeVerifier{returnGrant: grant}
+	authority := newFakeAuthority()
 	sensitiveCanary := "canary-db-timeout: sensitive internal host 10.10.10.5:5432"
 	executor := &recordingExecutor{
 		returnErr: errors.New(sensitiveCanary),
 	}
 
-	enforcer, err := pep.NewEnforcer(verifier, executor, clock)
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
 	if err != nil {
 		t.Fatalf("NewEnforcer failed: %v", err)
 	}
@@ -488,11 +978,12 @@ func TestEnforcer_Execute_ExecutionBoundaryExpiryChecks(t *testing.T) {
 
 			clock := &controllableClock{now: tc.now}
 			verifier := &fakeVerifier{returnGrant: grant}
+			authority := newFakeAuthority()
 			executor := &recordingExecutor{
 				returnRes: pep.ToolResult{Payload: []byte(`{"ok":true}`)},
 			}
 
-			enforcer, err := pep.NewEnforcer(verifier, executor, clock)
+			enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
 			if err != nil {
 				t.Fatalf("NewEnforcer failed: %v", err)
 			}
@@ -502,12 +993,18 @@ func TestEnforcer_Execute_ExecutionBoundaryExpiryChecks(t *testing.T) {
 				if !errors.Is(err, tc.expectedErr) {
 					t.Fatalf("expected error %v, got %v", tc.expectedErr, err)
 				}
+				if authority.calls != 0 {
+					t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: authority called %d times on expired grant", authority.calls)
+				}
 				if executor.calls != 0 {
 					t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called %d times on expired grant", executor.calls)
 				}
 			} else {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
+				}
+				if authority.calls != 1 {
+					t.Fatalf("expected authority called once, got %d", authority.calls)
 				}
 				if executor.calls != 1 {
 					t.Fatalf("expected executor called once, got %d", executor.calls)
@@ -533,9 +1030,10 @@ func TestEnforcer_Execute_TimeProgressionExpiresBetweenVerifyAndExecute(t *testi
 			clock.Set(exp)
 		},
 	}
+	authority := newFakeAuthority()
 	executor := &recordingExecutor{}
 
-	enforcer, err := pep.NewEnforcer(verifier, executor, clock)
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
 	if err != nil {
 		t.Fatalf("NewEnforcer failed: %v", err)
 	}
@@ -547,6 +1045,9 @@ func TestEnforcer_Execute_TimeProgressionExpiresBetweenVerifyAndExecute(t *testi
 
 	if verifier.calls != 1 {
 		t.Fatalf("expected verifier called once, got %d", verifier.calls)
+	}
+	if authority.calls != 0 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: authority called %d times on grant expired before claim", authority.calls)
 	}
 	if executor.calls != 0 {
 		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called %d times despite grant expiry at execution boundary", executor.calls)
@@ -564,9 +1065,10 @@ func TestEnforcer_Execute_SanityCheck_RejectsZeroOrPartialBoundObject(t *testing
 	corruptedGrant.ExpiresAt = time.Time{}
 
 	verifier := &fakeVerifier{returnGrant: corruptedGrant}
+	authority := newFakeAuthority()
 	executor := &recordingExecutor{}
 
-	enforcer, err := pep.NewEnforcer(verifier, executor, clock)
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
 	if err != nil {
 		t.Fatalf("NewEnforcer failed: %v", err)
 	}
@@ -574,6 +1076,9 @@ func TestEnforcer_Execute_SanityCheck_RejectsZeroOrPartialBoundObject(t *testing
 	_, err = enforcer.Execute(context.Background(), "token", attempt)
 	if !errors.Is(err, pep.ErrInvalidBoundAttempt) {
 		t.Fatalf("expected ErrInvalidBoundAttempt for zero ExpiresAt bound object, got %v", err)
+	}
+	if authority.calls != 0 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: authority called %d times on invalid bound object", authority.calls)
 	}
 	if executor.calls != 0 {
 		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called %d times on invalid bound object", executor.calls)
@@ -806,10 +1311,11 @@ func TestEnforcer_Execute_ComprehensiveFailureMatrix_ExecutorNeverCalled(t *test
 				returnGrant: grant,
 				returnErr:   verifierErr,
 			}
+			authority := newFakeAuthority()
 			executor := &recordingExecutor{}
 			clock := &controllableClock{now: tc.setupClock()}
 
-			enforcer, err := pep.NewEnforcer(verifier, executor, clock)
+			enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
 			if err != nil {
 				t.Fatalf("NewEnforcer failed: %v", err)
 			}
@@ -820,7 +1326,10 @@ func TestEnforcer_Execute_ComprehensiveFailureMatrix_ExecutorNeverCalled(t *test
 				t.Fatalf("expected error %v, got %v", tc.expectedErr, err)
 			}
 
-			// Core Fail-Closed Invariant: Executor call count MUST BE ZERO
+			// Core Fail-Closed Invariant: Neither authority nor executor called for pre-authority failures
+			if authority.calls != 0 {
+				t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION in %q: authority.calls == %d, expected 0", tc.name, authority.calls)
+			}
 			if executor.calls != 0 {
 				t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION in %q: executor.calls == %d, expected 0", tc.name, executor.calls)
 			}
@@ -841,9 +1350,10 @@ func TestEnforcer_Execute_ContextCancellation(t *testing.T) {
 		returnGrant: grant,
 		returnErr:   ctx.Err(),
 	}
+	authority := newFakeAuthority()
 	executor := &recordingExecutor{}
 
-	enforcer, err := pep.NewEnforcer(verifier, executor, clock)
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
 	if err != nil {
 		t.Fatalf("NewEnforcer failed: %v", err)
 	}
@@ -851,6 +1361,9 @@ func TestEnforcer_Execute_ContextCancellation(t *testing.T) {
 	_, err = enforcer.Execute(ctx, "token", attempt)
 	if !errors.Is(err, pep.ErrVerificationFailed) {
 		t.Fatalf("expected ErrVerificationFailed on canceled context, got %v", err)
+	}
+	if authority.calls != 0 {
+		t.Fatalf("authority should not be called when verifier fails on canceled context, calls=%d", authority.calls)
 	}
 	if executor.calls != 0 {
 		t.Fatalf("executor should not be called when verifier fails on canceled context, calls=%d", executor.calls)
@@ -934,12 +1447,13 @@ func TestEnforcer_Execute_EndToEndWithRealVerifier(t *testing.T) {
 	}
 	compactToken := string(signedBytes)
 
-	// 6. Build Enforcer with real verifier and recording executor
+	// 6. Build Enforcer with real verifier, fake authority, and recording executor
+	authority := newFakeAuthority()
 	executor := &recordingExecutor{
 		returnRes: pep.ToolResult{Payload: []byte(`{"snapshot_id":"snap_999"}`)},
 	}
 
-	enforcer, err := pep.NewEnforcer(realVerifier, executor, clock)
+	enforcer, err := pep.NewEnforcer(realVerifier, authority, executor, clock)
 	if err != nil {
 		t.Fatalf("NewEnforcer failed: %v", err)
 	}
@@ -960,6 +1474,9 @@ func TestEnforcer_Execute_EndToEndWithRealVerifier(t *testing.T) {
 		t.Fatalf("Execute failed with real verifier: %v", err)
 	}
 
+	if authority.calls != 1 {
+		t.Fatalf("expected authority called once, got %d", authority.calls)
+	}
 	if executor.calls != 1 {
 		t.Fatalf("expected executor called once, got %d", executor.calls)
 	}
@@ -978,5 +1495,132 @@ func TestEnforcer_Execute_EndToEndWithRealVerifier(t *testing.T) {
 	expectedResult := []byte(`{"snapshot_id":"snap_999"}`)
 	if !bytes.Equal(res.Payload, expectedResult) {
 		t.Fatalf("expected result %s, got %s", expectedResult, res.Payload)
+	}
+}
+
+func TestEnforcer_Execute_ConcurrentSameGrantID(t *testing.T) {
+	t.Parallel()
+
+	grant, attempt, _, _, _ := newValidTestFixtures()
+	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
+
+	verifier := &fakeVerifier{returnGrant: grant}
+	authority := newFakeAuthority()
+	executor := &recordingExecutor{
+		returnRes: pep.ToolResult{Payload: []byte(`{"status":"executed"}`)},
+	}
+
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
+	if err != nil {
+		t.Fatalf("NewEnforcer failed: %v", err)
+	}
+
+	const n = 20
+	token := "token.valid.concurrent"
+
+	type execOutcome struct {
+		res pep.ToolResult
+		err error
+	}
+
+	outcomes := make([]execOutcome, n)
+	startBarrier := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(n)
+
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			<-startBarrier
+			res, execErr := enforcer.Execute(context.Background(), token, attempt)
+			outcomes[i] = execOutcome{res: res, err: execErr}
+		}()
+	}
+
+	// Release all goroutines simultaneously
+	close(startBarrier)
+	wg.Wait()
+
+	var successCount int
+	var replayCount int
+
+	for i, o := range outcomes {
+		if o.err == nil {
+			successCount++
+			if !bytes.Equal(o.res.Payload, []byte(`{"status":"executed"}`)) {
+				t.Errorf("outcome %d unexpected payload: %s", i, o.res.Payload)
+			}
+		} else if errors.Is(o.err, pep.ErrExecutionReplay) {
+			replayCount++
+			if len(o.res.Payload) != 0 {
+				t.Errorf("outcome %d unexpected non-empty payload on replay: %s", i, o.res.Payload)
+			}
+		} else {
+			t.Errorf("outcome %d unexpected error category: %v", i, o.err)
+		}
+	}
+
+	if successCount != 1 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: expected exactly 1 success under concurrent contention, got %d", successCount)
+	}
+	if replayCount != n-1 {
+		t.Fatalf("expected exactly %d replay errors under concurrent contention, got %d", n-1, replayCount)
+	}
+
+	if authority.calls != n {
+		t.Fatalf("expected authority.calls == %d, got %d", n, authority.calls)
+	}
+	if executor.calls != 1 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called %d times under concurrent contention; expected exactly 1", executor.calls)
+	}
+}
+
+func TestEnforcer_Execute_AcquiredResultWithAuthorityErrorFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	grant, attempt, _, _, _ := newValidTestFixtures()
+	clock := &controllableClock{now: grant.ExpiresAt.Add(-10 * time.Second)}
+
+	verifier := &fakeVerifier{returnGrant: grant}
+	sensitiveCanary := "AUTHORITY_SECRET_CANARY"
+	authority := &fakeAuthority{
+		hasScriptedResult: true,
+		scriptedResult:    pep.ClaimAcquired,
+		scriptedErr:       errors.New(sensitiveCanary),
+	}
+	executor := &recordingExecutor{
+		returnRes: pep.ToolResult{Payload: []byte(`{"status":"executed"}`)},
+	}
+
+	enforcer, err := pep.NewEnforcer(verifier, authority, executor, clock)
+	if err != nil {
+		t.Fatalf("NewEnforcer failed: %v", err)
+	}
+
+	res, err := enforcer.Execute(context.Background(), "token", attempt)
+	if !errors.Is(err, pep.ErrExecutionAuthorityFailed) {
+		t.Fatalf("expected ErrExecutionAuthorityFailed when authority returns ClaimAcquired + non-nil error, got %v", err)
+	}
+
+	// Prove sensitive canary does not leak in err.Error(), %v, %+v
+	if strings.Contains(err.Error(), sensitiveCanary) {
+		t.Fatalf("sensitive canary leaked via err.Error(): %v", err)
+	}
+	if strings.Contains(fmt.Sprintf("%v", err), sensitiveCanary) {
+		t.Fatalf("sensitive canary leaked via fmt.Sprintf(%%v): %v", err)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", err), sensitiveCanary) {
+		t.Fatalf("sensitive canary leaked via fmt.Sprintf(%%+v): %v", err)
+	}
+
+	if authority.calls != 1 {
+		t.Fatalf("expected exactly 1 authority call, got %d", authority.calls)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("FAIL-CLOSED INVARIANT VIOLATION: executor called on authority error despite ClaimAcquired: calls=%d", executor.calls)
+	}
+	if len(res.Payload) != 0 {
+		t.Fatalf("expected empty result payload on authority error, got %s", res.Payload)
 	}
 }
