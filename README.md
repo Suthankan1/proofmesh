@@ -2,7 +2,7 @@
 
 ProofMesh is an in-progress, security-focused runtime governance and execution control plane for autonomous AI agents. It decouples governance decisions from tool execution: a Spring Boot control plane acts as the Policy Decision Point (PDP) to evaluate policy, manage human approvals, and issue short-lived execution grants, while a high-performance Go gateway acts as the sole Policy Enforcement Point (PEP) to verify grants offline, enforce exact request binding, guarantee single-use replay protection, and invoke protected tools.
 
-> **Status:** Active development. Core execution-grant verification, durable PostgreSQL replay protection, exact attempt binding, protected HTTP tool execution, runtime composition, and strict HTTP ingress handling are implemented; standalone server bootstrapping, network listener orchestration, and operational telemetry are in progress.
+> **Status:** Active development. Core execution-grant verification, durable PostgreSQL replay protection, exact attempt binding, protected HTTP tool execution, runtime composition, strict HTTP ingress handling, and gateway server bootstrap with graceful shutdown are implemented; operational telemetry and deployment hardening are in progress.
 
 ---
 
@@ -145,8 +145,8 @@ ProofMesh enforces the following non-negotiable security invariants:
 * [x] Strict execution ingress HTTP handler (`POST /v1/executions`) with bounded request bodies (1 MiB), strict JSON envelope validation, single Bearer token extraction, and sanitized HTTP error responses (`Cache-Control: no-store`)
 
 ### Roadmap / In Progress
-* [ ] Gateway standalone server bootstrap (`main.go` and network listener lifecycle)
-* [ ] Graceful shutdown and OS signal handling in gateway runtime
+* [x] Gateway standalone server bootstrap (`main.go` and network listener lifecycle)
+* [x] Graceful shutdown and OS signal handling in gateway runtime
 * [ ] Automated database migration runner for gateway deployment
 * [ ] Structured observability (OpenTelemetry distributed tracing and Prometheus metrics)
 * [ ] Execution audit log archival and automated retention policies
@@ -310,7 +310,7 @@ cd apps/control-plane && ./mvnw spring-boot:run -Dspring-boot.run.profiles=local
 
 ### 3. Gateway Runtime
 
-The Go gateway runtime composition, offline verifier, durable PostgreSQL replay authority, protected HTTP tool executor, and HTTP ingress handler are fully implemented and verified via unit and integration tests. Standalone process bootstrapping (`main.go` and network listener lifecycle) is actively in progress.
+The Go gateway runtime composition, offline verifier, durable PostgreSQL replay authority, protected HTTP tool executor, and HTTP ingress handler are fully implemented and verified via unit and integration tests. Standalone process bootstrapping (`main.go`) with `http.Server` lifecycle orchestration and graceful OS signal shutdown is implemented; the project remains under active development for operational and deployment hardening.
 
 ---
 
