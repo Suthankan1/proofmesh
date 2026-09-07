@@ -185,7 +185,7 @@ func newValidFixtures() (
 		panic(err)
 	}
 
-	exp := time.Now().Add(10 * time.Minute).UTC()
+	exp := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Microsecond)
 
 	grant := executiongrant.VerifiedExecutionGrant{
 		GrantID:              grantID,
@@ -422,8 +422,9 @@ func TestAuthority_Claim_PersistedMetadata(t *testing.T) {
 	if storedHash != grant.PayloadHash {
 		t.Errorf("payload_hash mismatch: got %s, want %s", storedHash, grant.PayloadHash)
 	}
-	if !storedExpiresAt.Equal(grant.ExpiresAt) {
-		t.Errorf("expires_at mismatch: got %s, want %s", storedExpiresAt, grant.ExpiresAt)
+	wantExpiresAt := grant.ExpiresAt.Truncate(time.Microsecond)
+	if !storedExpiresAt.Equal(wantExpiresAt) {
+		t.Errorf("expires_at mismatch: got %s, want %s", storedExpiresAt, wantExpiresAt)
 	}
 	if storedClaimedAt.IsZero() {
 		t.Fatal("claimed_at must not be zero")
