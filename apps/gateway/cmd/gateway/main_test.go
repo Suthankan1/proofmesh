@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,8 @@ type fakeRuntime struct {
 	actions  *[]string
 	actionMu *sync.Mutex
 }
+
+func (f *fakeRuntime) Ready(context.Context) error { return nil }
 
 func (f *fakeRuntime) Enforcer() *pep.Enforcer {
 	return f.enforcer
@@ -456,5 +459,120 @@ func TestRun_NormalServerClose(t *testing.T) {
 
 	if !rt.closed {
 		t.Fatal("expected runtime to be closed on shutdown")
+	}
+}
+
+func TestHealthReadinessRoutes(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, path string
+		failure            bool
+		code               int
+		body               string
+		calls              int
+	}{
+		{"health", "GET", "/healthz", true, 200, "{\"status\":\"ok\"}\n", 0},
+		{"ready", "GET", "/readyz", false, 200, "{\"status\":\"ready\"}\n", 1},
+		{"unavailable", "GET", "/readyz", true, 503, "{\"status\":\"not_ready\"}\n", 1},
+		{"health method", "POST", "/healthz", false, 405, "", 0},
+		{"ready method", "POST", "/readyz", false, 405, "", 0},
+		{"health HEAD", "HEAD", "/healthz", false, 405, "{\"status\":\"method_not_allowed\"}\n", 0},
+		{"ready HEAD", "HEAD", "/readyz", false, 405, "{\"status\":\"method_not_allowed\"}\n", 0},
+		{"unknown", "GET", "/unknown", false, 404, "", 0},
+		{"health suffix", "GET", "/healthz/extra", false, 404, "", 0},
+		{"ready suffix", "GET", "/readyz/extra", false, 404, "", 0},
+		{"execution suffix", "POST", "/v1/executions/extra", false, 404, "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			executionCalls := 0
+			h := newRoutes(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { executionCalls++ }), func(ctx context.Context) error {
+				calls++
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) > readinessTimeout {
+					t.Fatal("missing bounded deadline")
+				}
+				if tc.failure {
+					return errors.New("postgres://secret@canary-db:5432/internal")
+				}
+				return nil
+			})
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+			if w.Code != tc.code || calls != tc.calls {
+				t.Fatalf("code=%d calls=%d", w.Code, calls)
+			}
+			if executionCalls != 0 {
+				t.Fatalf("probe reached execution: calls=%d", executionCalls)
+			}
+			if tc.method == http.MethodHead && w.Header().Get("Allow") != http.MethodGet {
+				t.Fatalf("expected Allow: GET, got %q", w.Header().Get("Allow"))
+			}
+			if tc.body != "" {
+				assertProbe(t, w, tc.code, tc.body)
+			}
+		})
+	}
+}
+
+func assertProbe(t *testing.T, w *httptest.ResponseRecorder, code int, body string) {
+	t.Helper()
+	if w.Code != code || w.Body.String() != body || w.Header().Get("Content-Type") != "application/json" || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("unexpected probe response: %d %v %q", w.Code, w.Header(), w.Body.String())
+	}
+}
+
+func TestReadinessTimeoutAndCanceled(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "timeout", true: "canceled"}[canceled], func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if canceled {
+				cancel()
+			}
+			returned := false
+			h := newRoutes(http.NotFoundHandler(), func(probe context.Context) error {
+				<-probe.Done()
+				returned = true
+				return probe.Err()
+			})
+			w := httptest.NewRecorder()
+			start := time.Now()
+			h.ServeHTTP(w, httptest.NewRequest("GET", "/readyz", nil).WithContext(ctx))
+			elapsed := time.Since(start)
+			if !returned || elapsed > readinessTimeout+time.Second {
+				t.Fatal("readiness did not finish within bound")
+			}
+			if canceled && elapsed > time.Second {
+				t.Fatal("request cancellation was not propagated")
+			}
+			assertProbe(t, w, 503, "{\"status\":\"not_ready\"}\n")
+		})
+	}
+}
+
+func TestExecutionRouteDelegation(t *testing.T) {
+	ingress, err := httpingress.NewHandler(&pep.Enforcer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"POST", "GET", "PUT", "HEAD", "OPTIONS"} {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, httpingress.ExecutionEndpoint, nil)
+			direct := httptest.NewRecorder()
+			ingress.ServeHTTP(direct, req)
+			calls := 0
+			routes := newRoutes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r != req {
+					t.Fatal("execution request replaced")
+				}
+				ingress.ServeHTTP(w, r)
+			}), func(context.Context) error { t.Fatal("execution checked readiness"); return nil })
+			got := httptest.NewRecorder()
+			routes.ServeHTTP(got, req)
+			if calls != 1 || got.Code != direct.Code || got.Body.String() != direct.Body.String() || got.Header().Get("Allow") != direct.Header().Get("Allow") {
+				t.Fatalf("execution ingress behavior changed: %d %q", got.Code, got.Body.String())
+			}
+		})
 	}
 }

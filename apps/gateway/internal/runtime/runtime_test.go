@@ -593,6 +593,11 @@ func TestRuntimeAPISurface(t *testing.T) {
 	allowedMethods := map[string]bool{
 		"Close":    true,
 		"Enforcer": true,
+		"Ready":    true,
+	}
+	ready, found := rtType.MethodByName("Ready")
+	if !found || ready.Type != reflect.TypeOf(func(*Runtime, context.Context) error { return nil }) {
+		t.Fatal("Runtime.Ready must expose only a context-to-error readiness operation")
 	}
 
 	for i := 0; i < methodCount; i++ {
@@ -816,4 +821,43 @@ func makeJWKSBytes(t *testing.T, pubKey ecdsa.PublicKey, kid string) []byte {
 		t.Fatalf("failed to marshal JWKS: %v", err)
 	}
 	return data
+}
+
+func TestReady(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rt, err := New(ctx, Config{
+		DatabaseURL: testConnStr, Issuer: "issuer", Audience: "gateway",
+		JWKSURL:     "http://localhost:8080/jwks",
+		ToolTargets: []httpexecutor.Target{{ToolName: "test", OperationName: "test", URL: "http://localhost:8080/tool"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	if err := rt.Ready(ctx); err != nil {
+		t.Fatalf("live runtime not ready: %v", err)
+	}
+	canceled, stop := context.WithCancel(ctx)
+	stop()
+	start := time.Now()
+	assertNotReady(t, rt.Ready(canceled))
+	if time.Since(start) > time.Second {
+		t.Fatal("canceled readiness did not return promptly")
+	}
+	// Closing the owned pool deterministically exercises database unavailability.
+	rt.pool.Close()
+	assertNotReady(t, rt.Ready(ctx))
+	rt.Close()
+	assertNotReady(t, rt.Ready(ctx))
+	var absent *Runtime
+	assertNotReady(t, absent.Ready(ctx))
+	assertNotReady(t, (&Runtime{}).Ready(ctx))
+}
+
+func assertNotReady(t *testing.T, err error) {
+	t.Helper()
+	if err != ErrNotReady || err.Error() != "runtime: not ready" {
+		t.Fatalf("expected sanitized readiness sentinel, got %v", err)
+	}
 }

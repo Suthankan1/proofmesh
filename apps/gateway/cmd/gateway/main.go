@@ -23,6 +23,7 @@ const (
 	defaultWriteTimeout      = 30 * time.Second
 	defaultIdleTimeout       = 60 * time.Second
 	defaultShutdownTimeout   = 10 * time.Second
+	readinessTimeout         = 2 * time.Second
 )
 
 // Sanitized sentinel errors returned by gateway application bootstrap and lifecycle.
@@ -39,6 +40,7 @@ var (
 
 type gatewayRuntime interface {
 	Enforcer() *pep.Enforcer
+	Ready(context.Context) error
 	Close()
 }
 
@@ -119,7 +121,7 @@ func runWithDeps(ctx context.Context, deps serverDeps) error {
 		return ErrHandlerInitFailed
 	}
 
-	srv := deps.newServer(defaultListenAddress, handler)
+	srv := deps.newServer(defaultListenAddress, newRoutes(handler, rt.Ready))
 	shutdownTimeout := deps.shutdownTimeout
 	if shutdownTimeout <= 0 {
 		shutdownTimeout = defaultShutdownTimeout
@@ -167,4 +169,40 @@ func runWithDeps(ctx context.Context, deps serverDeps) error {
 		log.Println("gateway startup failed")
 		return ErrServerExited
 	}
+}
+
+func newRoutes(executionHandler http.Handler, ready func(context.Context) error) http.Handler {
+	mux := http.NewServeMux()
+	// Preserve ingress's exact method validation and sanitized execution responses.
+	mux.Handle(httpingress.ExecutionEndpoint, executionHandler)
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeProbe(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		writeProbe(w, http.StatusOK, "ok")
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			writeProbe(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), readinessTimeout)
+		defer cancel()
+		if err := ready(ctx); err != nil {
+			writeProbe(w, http.StatusServiceUnavailable, "not_ready")
+			return
+		}
+		writeProbe(w, http.StatusOK, "ready")
+	})
+	return mux
+}
+
+func writeProbe(w http.ResponseWriter, code int, status string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(code)
+	_, _ = w.Write([]byte(`{"status":"` + status + `"}` + "\n"))
 }

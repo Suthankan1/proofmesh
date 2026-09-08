@@ -18,6 +18,7 @@ import (
 // Sentinel runtime errors. Infrastructure details, connection strings, credentials,
 // and raw errors are strictly sanitized and never returned across this boundary.
 var (
+	ErrNotReady                = errors.New("runtime: not ready")
 	ErrInvalidConfig           = errors.New("runtime: invalid configuration")
 	ErrDatabaseUnavailable     = errors.New("runtime: database unavailable")
 	ErrAuthorityInitialization = errors.New("runtime: authority initialization failed")
@@ -27,7 +28,7 @@ var (
 )
 
 // Runtime is the composition root owning the gateway security pipeline and its database pool.
-// It exposes only the Policy Enforcement Point (*pep.Enforcer) and lifecycle cleanup (Close).
+// It exposes the Policy Enforcement Point, readiness, and lifecycle cleanup.
 // It intentionally does NOT expose raw tool executors, execution authorities, verifiers, or pools.
 type Runtime struct {
 	enforcer  *pep.Enforcer
@@ -216,6 +217,18 @@ func (r *Runtime) Close() {
 			r.transport.CloseIdleConnections()
 		}
 	})
+}
+
+// Ready checks only PostgreSQL availability using the caller's bounded context.
+// Nil, uninitialized, and closed runtimes fail closed without exposing driver errors.
+func (r *Runtime) Ready(ctx context.Context) error {
+	if r == nil || r.pool == nil || ctx.Err() != nil {
+		return ErrNotReady
+	}
+	if err := r.pool.Ping(ctx); err != nil {
+		return ErrNotReady
+	}
+	return nil
 }
 
 func validateConfig(cfg *Config) error {
