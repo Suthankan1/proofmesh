@@ -1,3 +1,4 @@
+-- +goose Up
 CREATE TABLE execution_grant_claims (
     grant_id UUID PRIMARY KEY,
     organization_id UUID NOT NULL,

@@ -27,6 +27,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/canonicalize"
+	"github.com/Suthankan1/proofmesh/apps/gateway/internal/dbmigrate"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/executionattempt"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/executiongrant"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/pep"
@@ -59,28 +60,12 @@ func TestMain(m *testing.M) {
 	}
 	testConnStr = connStr
 
-	// Apply migration 0001
-	migrationSQL, err := readMigrationSQL()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to read migration SQL: %v\n", err)
-		_ = pgContainer.Terminate(context.Background())
-		os.Exit(1)
-	}
-
-	setupPool, err := pgxpool.New(ctx, testConnStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to connect to test postgres: %v\n", err)
-		_ = pgContainer.Terminate(context.Background())
-		os.Exit(1)
-	}
-
-	if _, err := setupPool.Exec(ctx, migrationSQL); err != nil {
+	// Apply migration 0001 using authoritative runner
+	if err := dbmigrate.Run(ctx, testConnStr); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to apply migration: %v\n", err)
-		setupPool.Close()
 		_ = pgContainer.Terminate(context.Background())
 		os.Exit(1)
 	}
-	setupPool.Close()
 
 	code := m.Run()
 
@@ -89,23 +74,6 @@ func TestMain(m *testing.M) {
 	_ = pgContainer.Terminate(termCtx)
 
 	os.Exit(code)
-}
-
-func readMigrationSQL() (string, error) {
-	candidates := []string{
-		"../../migrations/0001_create_execution_grant_claims.sql",
-		"migrations/0001_create_execution_grant_claims.sql",
-		"../migrations/0001_create_execution_grant_claims.sql",
-		"../../../migrations/0001_create_execution_grant_claims.sql",
-	}
-
-	for _, p := range candidates {
-		data, err := os.ReadFile(p)
-		if err == nil {
-			return string(data), nil
-		}
-	}
-	return "", errors.New("could not find migration file")
 }
 
 // 1. Config Validation Tests

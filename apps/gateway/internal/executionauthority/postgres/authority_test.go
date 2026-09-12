@@ -15,6 +15,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/canonicalize"
+	"github.com/Suthankan1/proofmesh/apps/gateway/internal/dbmigrate"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/executionattempt"
 	postgres "github.com/Suthankan1/proofmesh/apps/gateway/internal/executionauthority/postgres"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/executiongrant"
@@ -49,28 +50,12 @@ func TestMain(m *testing.M) {
 	}
 	testConnStr = connStr
 
-	// Apply migration
-	migrationSQL, err := readMigrationSQL()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to read migration SQL: %v\n", err)
-		_ = pgContainer.Terminate(context.Background())
-		os.Exit(1)
-	}
-
-	setupPool, err := pgxpool.New(ctx, testConnStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to connect to test postgres: %v\n", err)
-		_ = pgContainer.Terminate(context.Background())
-		os.Exit(1)
-	}
-
-	if _, err := setupPool.Exec(ctx, migrationSQL); err != nil {
+	// Apply migration using authoritative runner
+	if err := dbmigrate.Run(ctx, testConnStr); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to apply migration: %v\n", err)
-		setupPool.Close()
 		_ = pgContainer.Terminate(context.Background())
 		os.Exit(1)
 	}
-	setupPool.Close()
 
 	code := m.Run()
 
@@ -79,21 +64,6 @@ func TestMain(m *testing.M) {
 	_ = pgContainer.Terminate(termCtx)
 
 	os.Exit(code)
-}
-
-func readMigrationSQL() (string, error) {
-	candidates := []string{
-		"../../../migrations/0001_create_execution_grant_claims.sql",
-		"../../migrations/0001_create_execution_grant_claims.sql",
-		"../migrations/0001_create_execution_grant_claims.sql",
-		"migrations/0001_create_execution_grant_claims.sql",
-	}
-	for _, c := range candidates {
-		if data, err := os.ReadFile(c); err == nil {
-			return string(data), nil
-		}
-	}
-	return "", fmt.Errorf("could not locate 0001_create_execution_grant_claims.sql in candidate paths")
 }
 
 func newTestPool(t *testing.T) *pgxpool.Pool {
