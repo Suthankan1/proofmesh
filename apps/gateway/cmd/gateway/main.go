@@ -14,6 +14,7 @@ import (
 	httpingress "github.com/Suthankan1/proofmesh/apps/gateway/internal/ingress/http"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/pep"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/runtime"
+	"github.com/Suthankan1/proofmesh/apps/gateway/internal/telemetry"
 )
 
 const (
@@ -31,6 +32,7 @@ const (
 // are never logged or leaked across this boundary.
 var (
 	ErrConfigLoadFailed    = errors.New("gateway: failed to load configuration")
+	ErrTelemetryInitFailed = errors.New("gateway: failed to initialize telemetry")
 	ErrRuntimeInitFailed   = errors.New("gateway: failed to initialize runtime")
 	ErrHandlerInitFailed   = errors.New("gateway: failed to initialize handler")
 	ErrServerExited        = errors.New("gateway: server exited unexpectedly")
@@ -44,6 +46,11 @@ type gatewayRuntime interface {
 	Close()
 }
 
+type gatewayTelemetry interface {
+	WrapExecutionHandler(http.Handler) http.Handler
+	Shutdown(context.Context) error
+}
+
 type httpServer interface {
 	ListenAndServe() error
 	Shutdown(ctx context.Context) error
@@ -51,11 +58,13 @@ type httpServer interface {
 }
 
 type serverDeps struct {
-	loadConfig      func() (runtime.Config, error)
-	newRuntime      func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error)
-	newHandler      func(enforcer *pep.Enforcer) (http.Handler, error)
-	newServer       func(addr string, handler http.Handler) httpServer
-	shutdownTimeout time.Duration
+	loadConfig       func() (appconfig.Config, error)
+	newRuntime       func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error)
+	newTelemetry     func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error)
+	newHandler       func(enforcer *pep.Enforcer) (http.Handler, error)
+	newServer        func(addr string, handler http.Handler) httpServer
+	shutdownTimeout  time.Duration
+	telemetryTimeout time.Duration
 }
 
 func defaultDeps() serverDeps {
@@ -64,13 +73,17 @@ func defaultDeps() serverDeps {
 		newRuntime: func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
 			return runtime.New(ctx, cfg)
 		},
+		newTelemetry: func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+			return telemetry.New(ctx, cfg)
+		},
 		newHandler: func(enforcer *pep.Enforcer) (http.Handler, error) {
 			return httpingress.NewHandler(enforcer)
 		},
 		newServer: func(addr string, handler http.Handler) httpServer {
 			return defaultNewServer(addr, handler)
 		},
-		shutdownTimeout: defaultShutdownTimeout,
+		shutdownTimeout:  defaultShutdownTimeout,
+		telemetryTimeout: defaultShutdownTimeout,
 	}
 }
 
@@ -108,8 +121,25 @@ func runWithDeps(ctx context.Context, deps serverDeps) error {
 		return ErrConfigLoadFailed
 	}
 
-	rt, err := deps.newRuntime(ctx, cfg)
+	tel, err := deps.newTelemetry(ctx, cfg.Telemetry)
 	if err != nil {
+		log.Println("gateway startup failed")
+		return ErrTelemetryInitFailed
+	}
+
+	shutdownTelemetry := func() error {
+		timeout := deps.telemetryTimeout
+		if timeout <= 0 {
+			timeout = defaultShutdownTimeout
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		return tel.Shutdown(shutdownCtx)
+	}
+
+	rt, err := deps.newRuntime(ctx, cfg.Config)
+	if err != nil {
+		_ = shutdownTelemetry()
 		log.Println("gateway startup failed")
 		return ErrRuntimeInitFailed
 	}
@@ -117,11 +147,13 @@ func runWithDeps(ctx context.Context, deps serverDeps) error {
 	handler, err := deps.newHandler(rt.Enforcer())
 	if err != nil {
 		rt.Close()
+		_ = shutdownTelemetry()
 		log.Println("gateway startup failed")
 		return ErrHandlerInitFailed
 	}
 
-	srv := deps.newServer(defaultListenAddress, newRoutes(handler, rt.Ready))
+	wrappedExecution := tel.WrapExecutionHandler(handler)
+	srv := deps.newServer(defaultListenAddress, newRoutes(wrappedExecution, handler, rt.Ready))
 	shutdownTimeout := deps.shutdownTimeout
 	if shutdownTimeout <= 0 {
 		shutdownTimeout = defaultShutdownTimeout
@@ -147,6 +179,9 @@ func runWithDeps(ctx context.Context, deps serverDeps) error {
 		// CRITICAL: Close runtime AFTER HTTP server shutdown completes
 		rt.Close()
 
+		// CRITICAL: Shut down telemetry AFTER runtime Close completes
+		telErr := shutdownTelemetry()
+
 		if shutdownErr != nil {
 			log.Println("gateway shutdown failed")
 			return ErrShutdownFailed
@@ -157,11 +192,17 @@ func runWithDeps(ctx context.Context, deps serverDeps) error {
 			return ErrShutdownServerError
 		}
 
+		if telErr != nil {
+			log.Println("gateway shutdown failed")
+			return ErrShutdownFailed
+		}
+
 		log.Println("gateway stopped")
 		return nil
 
 	case serveErr := <-serverErr:
 		rt.Close()
+		_ = shutdownTelemetry()
 		if ctx.Err() != nil && (serveErr == nil || errors.Is(serveErr, http.ErrServerClosed)) {
 			log.Println("gateway stopped")
 			return nil
@@ -171,10 +212,13 @@ func runWithDeps(ctx context.Context, deps serverDeps) error {
 	}
 }
 
-func newRoutes(executionHandler http.Handler, ready func(context.Context) error) http.Handler {
+func newRoutes(tracedExecutionHandler, untracedExecutionHandler http.Handler, ready func(context.Context) error) http.Handler {
 	mux := http.NewServeMux()
-	// Preserve ingress's exact method validation and sanitized execution responses.
-	mux.Handle(httpingress.ExecutionEndpoint, executionHandler)
+	// POST /v1/executions routes to the traced execution handler.
+	mux.Handle("POST "+httpingress.ExecutionEndpoint, tracedExecutionHandler)
+	// Other methods on /v1/executions route to the untraced ingress handler,
+	// preserving ingress's exact method validation, 405/Allow behavior, and sanitized responses.
+	mux.Handle(httpingress.ExecutionEndpoint, untracedExecutionHandler)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)

@@ -31,11 +31,19 @@ func validEnvMap() map[string]string {
 	}
 }
 
-func mapLookup(m map[string]string) lookupEnv {
-	return func(key string) (string, bool) {
+func mapLookup(m map[string]string) (lookupEnv, environFunc) {
+	lookup := func(key string) (string, bool) {
 		val, ok := m[key]
 		return val, ok
 	}
+	environ := func() []string {
+		res := make([]string, 0, len(m))
+		for k, v := range m {
+			res = append(res, k+"="+v)
+		}
+		return res
+	}
+	return lookup, environ
 }
 
 func TestLoad_Positive(t *testing.T) {
@@ -443,5 +451,233 @@ func TestLoad_PublicAPIWithOSLookup(t *testing.T) {
 	}
 	if len(cfg.ToolTargets) != 2 {
 		t.Errorf("expected 2 targets, got %d", len(cfg.ToolTargets))
+	}
+	if cfg.Telemetry.Enabled() {
+		t.Error("expected telemetry to be disabled by default in public Load()")
+	}
+}
+
+func TestLoad_TelemetryConfig(t *testing.T) {
+	t.Run("absent endpoint disables telemetry", func(t *testing.T) {
+		env := validEnvMap()
+		delete(env, EnvOTLPEndpoint)
+
+		cfg, err := load(mapLookup(env))
+		if err != nil {
+			t.Fatalf("expected load to succeed, got: %v", err)
+		}
+		if cfg.Telemetry.Enabled() {
+			t.Fatal("expected telemetry to be disabled when endpoint is absent")
+		}
+		if cfg.Telemetry.Endpoint != "" {
+			t.Fatalf("expected empty endpoint, got %q", cfg.Telemetry.Endpoint)
+		}
+	})
+
+	t.Run("blank endpoint disables telemetry", func(t *testing.T) {
+		for _, blank := range []string{"", "   ", "\t\n "} {
+			env := validEnvMap()
+			env[EnvOTLPEndpoint] = blank
+
+			cfg, err := load(mapLookup(env))
+			if err != nil {
+				t.Fatalf("expected load to succeed for blank %q, got: %v", blank, err)
+			}
+			if cfg.Telemetry.Enabled() {
+				t.Fatalf("expected telemetry to be disabled for blank %q", blank)
+			}
+			if cfg.Telemetry.Endpoint != "" {
+				t.Fatalf("expected empty endpoint, got %q", cfg.Telemetry.Endpoint)
+			}
+		}
+	})
+
+	t.Run("valid endpoint enables telemetry", func(t *testing.T) {
+		for _, valid := range []string{
+			"http://localhost:4318",
+			"https://collector.internal:4318",
+			"https://collector.internal:4318/base",
+			"http://[::1]:4318",
+			"http://[2001:db8::1]:4318",
+			"HTTP://COLLECTOR:4318",
+		} {
+			env := validEnvMap()
+			env[EnvOTLPEndpoint] = valid
+
+			cfg, err := load(mapLookup(env))
+			if err != nil {
+				t.Fatalf("expected load to succeed for valid endpoint %q, got: %v", valid, err)
+			}
+			if !cfg.Telemetry.Enabled() {
+				t.Fatalf("expected telemetry to be enabled for valid endpoint %q", valid)
+			}
+			if cfg.Telemetry.Endpoint != valid {
+				t.Fatalf("expected endpoint %q, got %q", valid, cfg.Telemetry.Endpoint)
+			}
+		}
+	})
+
+	t.Run("surrounding whitespace rejected on nonblank endpoint", func(t *testing.T) {
+		for _, spaced := range []string{
+			"  http://collector:4318",
+			"http://collector:4318  ",
+			" http://collector:4318 ",
+			"\thttp://collector:4318\n",
+		} {
+			env := validEnvMap()
+			env[EnvOTLPEndpoint] = spaced
+
+			_, err := load(mapLookup(env))
+			if err == nil {
+				t.Fatalf("expected error for endpoint with surrounding whitespace %q, got nil", spaced)
+			}
+			if !errors.Is(err, ErrInvalidEnvironment) {
+				t.Errorf("expected ErrInvalidEnvironment for %q, got: %v", spaced, err)
+			}
+			if !strings.Contains(err.Error(), EnvOTLPEndpoint) {
+				t.Errorf("expected error to mention %s, got: %v", EnvOTLPEndpoint, err)
+			}
+		}
+	})
+
+	t.Run("malformed endpoint returns sanitized error", func(t *testing.T) {
+		invalidEndpoints := []string{
+			"://bad-url",
+			"localhost:4318",
+			"http://",
+			"https://",
+			"ftp://collector.internal:4318",
+			"http://collector:4318 with spaces",
+			"http://collector:4318\nnewline",
+			"https://user:secret@collector:4318",
+			"https://collector:4318?token=secret",
+			"https://collector:4318/#fragment",
+			"http://:4318",
+			"http://collector:badport",
+			"http://collector:0",
+			"http://collector:65536",
+			"http://[invalid]:4318",
+			"http://[::1",
+			"mailto:collector@example.com",
+		}
+
+		for _, invalid := range invalidEndpoints {
+			env := validEnvMap()
+			env[EnvOTLPEndpoint] = invalid
+
+			_, err := load(mapLookup(env))
+			if err == nil {
+				t.Fatalf("expected error for invalid endpoint %q, got nil", invalid)
+			}
+			if !errors.Is(err, ErrInvalidEnvironment) {
+				t.Errorf("expected ErrInvalidEnvironment for %q, got: %v", invalid, err)
+			}
+			if !strings.Contains(err.Error(), EnvOTLPEndpoint) {
+				t.Errorf("expected error to mention %s, got: %v", EnvOTLPEndpoint, err)
+			}
+		}
+	})
+
+	t.Run("unsupported OTEL variable fails startup when telemetry enabled", func(t *testing.T) {
+		unsupportedKeys := []string{
+			"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+			"OTEL_EXPORTER_OTLP_HEADERS",
+			"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+			"OTEL_EXPORTER_OTLP_TIMEOUT",
+			"OTEL_EXPORTER_OTLP_CERTIFICATE",
+			"OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+			"OTEL_EXPORTER_OTLP_CLIENT_KEY",
+			"OTEL_EXPORTER_OTLP_PROTOCOL",
+			"OTEL_BSP_SCHEDULE_DELAY",
+			"OTEL_BSP_EXPORT_TIMEOUT",
+			"OTEL_BSP_MAX_QUEUE_SIZE",
+			"OTEL_RESOURCE_ATTRIBUTES",
+			"OTEL_SERVICE_NAME",
+			"OTEL_TRACES_SAMPLER",
+			"OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT",
+		}
+
+		for _, key := range unsupportedKeys {
+			env := validEnvMap()
+			env[EnvOTLPEndpoint] = "http://collector:4318"
+			canaryValue := "canary-unsupported-val-12345"
+			env[key] = canaryValue
+
+			_, err := load(mapLookup(env))
+			if err == nil {
+				t.Fatalf("expected startup failure for unsupported key %s, got nil", key)
+			}
+			if !errors.Is(err, ErrInvalidEnvironment) {
+				t.Errorf("expected ErrInvalidEnvironment for %s, got: %v", key, err)
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("expected error message to mention variable name %s, got: %v", key, err)
+			}
+			if strings.Contains(err.Error(), canaryValue) {
+				t.Fatalf("unsupported variable value %q leaked into error: %v", canaryValue, err)
+			}
+		}
+	})
+
+	t.Run("disabled telemetry ignores hostile OTEL variables", func(t *testing.T) {
+		hostileVars := map[string]string{
+			"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://evil:4318",
+			"OTEL_EXPORTER_OTLP_HEADERS":         "evil=true",
+			"OTEL_BSP_SCHEDULE_DELAY":            "1",
+			"OTEL_RESOURCE_ATTRIBUTES":           "service.name=evil",
+			"OTEL_TRACES_SAMPLER":                "always_on",
+		}
+
+		for _, blankEndpoint := range []string{"", "   ", "\t\n "} {
+			env := validEnvMap()
+			env[EnvOTLPEndpoint] = blankEndpoint
+			for k, v := range hostileVars {
+				env[k] = v
+			}
+
+			cfg, err := load(mapLookup(env))
+			if err != nil {
+				t.Fatalf("expected load to succeed when telemetry disabled despite hostile vars, got: %v", err)
+			}
+			if cfg.Telemetry.Enabled() {
+				t.Fatal("expected telemetry to remain disabled")
+			}
+		}
+
+		// Also when EnvOTLPEndpoint is completely unset
+		env := validEnvMap()
+		delete(env, EnvOTLPEndpoint)
+		for k, v := range hostileVars {
+			env[k] = v
+		}
+
+		cfg, err := load(mapLookup(env))
+		if err != nil {
+			t.Fatalf("expected load to succeed when endpoint unset despite hostile vars, got: %v", err)
+		}
+		if cfg.Telemetry.Enabled() {
+			t.Fatal("expected telemetry to remain disabled")
+		}
+	})
+}
+
+func TestLoad_TelemetryEndpointSanitization(t *testing.T) {
+	canaryEndpointSecret := "canary-secret-token-do-not-leak"
+	malformedCanary := fmt.Sprintf("http://%s:secret@collector.internal:4318 with spaces", canaryEndpointSecret)
+
+	env := validEnvMap()
+	env[EnvOTLPEndpoint] = malformedCanary
+
+	_, err := load(mapLookup(env))
+	if err == nil {
+		t.Fatal("expected error for malformed endpoint with canary secret")
+	}
+
+	errStr := err.Error()
+	if strings.Contains(errStr, canaryEndpointSecret) {
+		t.Fatalf("canary endpoint secret leaked into error string: %s", errStr)
+	}
+	if strings.Contains(errStr, "collector.internal") {
+		t.Fatalf("endpoint host leaked into error string: %s", errStr)
 	}
 }

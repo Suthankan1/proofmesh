@@ -9,9 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Suthankan1/proofmesh/apps/gateway/internal/appconfig"
 	httpingress "github.com/Suthankan1/proofmesh/apps/gateway/internal/ingress/http"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/pep"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/runtime"
+	"github.com/Suthankan1/proofmesh/apps/gateway/internal/telemetry"
 )
 
 type fakeRuntime struct {
@@ -37,6 +39,41 @@ func (f *fakeRuntime) Close() {
 		*f.actions = append(*f.actions, "runtime:close")
 		f.actionMu.Unlock()
 	}
+}
+
+type fakeTelemetry struct {
+	wrapped       bool
+	shutdownErr   error
+	shutdownCalls int
+	mu            sync.Mutex
+	actions       *[]string
+	actionMu      *sync.Mutex
+}
+
+func (f *fakeTelemetry) WrapExecutionHandler(next http.Handler) http.Handler {
+	f.mu.Lock()
+	f.wrapped = true
+	f.mu.Unlock()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f.actions != nil && f.actionMu != nil {
+			f.actionMu.Lock()
+			*f.actions = append(*f.actions, "telemetry:wrap:serve")
+			f.actionMu.Unlock()
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (f *fakeTelemetry) Shutdown(ctx context.Context) error {
+	f.mu.Lock()
+	f.shutdownCalls++
+	f.mu.Unlock()
+	if f.actions != nil && f.actionMu != nil {
+		f.actionMu.Lock()
+		*f.actions = append(*f.actions, "telemetry:shutdown")
+		f.actionMu.Unlock()
+	}
+	return f.shutdownErr
 }
 
 type fakeServer struct {
@@ -77,32 +114,58 @@ func (s *fakeServer) Close() error {
 	return nil
 }
 
+func baseTestDeps() serverDeps {
+	return serverDeps{
+		loadConfig: func() (appconfig.Config, error) {
+			return appconfig.Config{}, nil
+		},
+		newTelemetry: func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+			return &fakeTelemetry{}, nil
+		},
+		newRuntime: func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
+			return &fakeRuntime{}, nil
+		},
+		newHandler: func(enforcer *pep.Enforcer) (http.Handler, error) {
+			return http.NotFoundHandler(), nil
+		},
+		newServer: func(addr string, h http.Handler) httpServer {
+			return &fakeServer{listenDone: make(chan struct{})}
+		},
+		shutdownTimeout:  5 * time.Second,
+		telemetryTimeout: 5 * time.Second,
+	}
+}
+
 // A. Config failure:
-// config load fails -> runtime not built -> server not started
+// config load fails -> telemetry/runtime not built -> server not started
 func TestRun_ConfigFailure(t *testing.T) {
+	telemetryBuilt := false
 	runtimeBuilt := false
 	serverStarted := false
 
-	deps := serverDeps{
-		loadConfig: func() (runtime.Config, error) {
-			return runtime.Config{}, errors.New("missing environment variable")
-		},
-		newRuntime: func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
-			runtimeBuilt = true
-			return nil, nil
-		},
-		newHandler: func(enforcer *pep.Enforcer) (http.Handler, error) {
-			return nil, nil
-		},
-		newServer: func(addr string, h http.Handler) httpServer {
-			serverStarted = true
-			return nil
-		},
+	deps := baseTestDeps()
+	deps.loadConfig = func() (appconfig.Config, error) {
+		return appconfig.Config{}, errors.New("missing environment variable")
+	}
+	deps.newTelemetry = func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+		telemetryBuilt = true
+		return &fakeTelemetry{}, nil
+	}
+	deps.newRuntime = func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
+		runtimeBuilt = true
+		return &fakeRuntime{}, nil
+	}
+	deps.newServer = func(addr string, h http.Handler) httpServer {
+		serverStarted = true
+		return nil
 	}
 
 	err := runWithDeps(context.Background(), deps)
 	if !errors.Is(err, ErrConfigLoadFailed) {
 		t.Fatalf("expected ErrConfigLoadFailed, got %v", err)
+	}
+	if telemetryBuilt {
+		t.Fatal("expected telemetry not to be built on config failure")
 	}
 	if runtimeBuilt {
 		t.Fatal("expected runtime not to be built on config failure")
@@ -112,32 +175,66 @@ func TestRun_ConfigFailure(t *testing.T) {
 	}
 }
 
+// Telemetry init failure:
+// telemetry build fails -> runtime/handler/server not built
+func TestRun_TelemetryInitFailure(t *testing.T) {
+	runtimeBuilt := false
+	serverStarted := false
+
+	deps := baseTestDeps()
+	deps.newTelemetry = func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+		return nil, errors.New("telemetry initialization error")
+	}
+	deps.newRuntime = func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
+		runtimeBuilt = true
+		return &fakeRuntime{}, nil
+	}
+	deps.newServer = func(addr string, h http.Handler) httpServer {
+		serverStarted = true
+		return nil
+	}
+
+	err := runWithDeps(context.Background(), deps)
+	if !errors.Is(err, ErrTelemetryInitFailed) {
+		t.Fatalf("expected ErrTelemetryInitFailed, got %v", err)
+	}
+	if runtimeBuilt {
+		t.Fatal("expected runtime not to be built on telemetry init failure")
+	}
+	if serverStarted {
+		t.Fatal("expected server not to be started on telemetry init failure")
+	}
+}
+
 // B. Runtime construction failure:
-// runtime build fails -> handler/server not started
+// runtime build fails -> telemetry shutdown called -> handler/server not started
 func TestRun_RuntimeConstructionFailure(t *testing.T) {
+	tel := &fakeTelemetry{}
 	handlerBuilt := false
 	serverStarted := false
 
-	deps := serverDeps{
-		loadConfig: func() (runtime.Config, error) {
-			return runtime.Config{}, nil
-		},
-		newRuntime: func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
-			return nil, errors.New("database unavailable")
-		},
-		newHandler: func(enforcer *pep.Enforcer) (http.Handler, error) {
-			handlerBuilt = true
-			return nil, nil
-		},
-		newServer: func(addr string, h http.Handler) httpServer {
-			serverStarted = true
-			return nil
-		},
+	deps := baseTestDeps()
+	deps.newTelemetry = func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+		return tel, nil
+	}
+	deps.newRuntime = func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
+		return nil, errors.New("database unavailable")
+	}
+	deps.newHandler = func(enforcer *pep.Enforcer) (http.Handler, error) {
+		handlerBuilt = true
+		return nil, nil
+	}
+	deps.newServer = func(addr string, h http.Handler) httpServer {
+		serverStarted = true
+		return nil
 	}
 
 	err := runWithDeps(context.Background(), deps)
 	if !errors.Is(err, ErrRuntimeInitFailed) {
 		t.Fatalf("expected ErrRuntimeInitFailed, got %v", err)
+	}
+	if tel.shutdownCalls != 1 {
+		t.Fatalf("expected telemetry shutdown to be called once on runtime construction failure, got %d", tel.shutdownCalls)
 	}
 	if handlerBuilt {
 		t.Fatal("expected handler not to be built on runtime construction failure")
@@ -148,25 +245,25 @@ func TestRun_RuntimeConstructionFailure(t *testing.T) {
 }
 
 // C. Handler construction failure:
-// runtime exists -> handler build fails -> runtime closes
+// runtime exists -> handler build fails -> runtime closes, telemetry shuts down
 func TestRun_HandlerConstructionFailure(t *testing.T) {
+	tel := &fakeTelemetry{}
 	rt := &fakeRuntime{}
 	serverStarted := false
 
-	deps := serverDeps{
-		loadConfig: func() (runtime.Config, error) {
-			return runtime.Config{}, nil
-		},
-		newRuntime: func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
-			return rt, nil
-		},
-		newHandler: func(enforcer *pep.Enforcer) (http.Handler, error) {
-			return nil, errors.New("handler initialization failed")
-		},
-		newServer: func(addr string, h http.Handler) httpServer {
-			serverStarted = true
-			return nil
-		},
+	deps := baseTestDeps()
+	deps.newTelemetry = func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+		return tel, nil
+	}
+	deps.newRuntime = func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
+		return rt, nil
+	}
+	deps.newHandler = func(enforcer *pep.Enforcer) (http.Handler, error) {
+		return nil, errors.New("handler initialization failed")
+	}
+	deps.newServer = func(addr string, h http.Handler) httpServer {
+		serverStarted = true
+		return nil
 	}
 
 	err := runWithDeps(context.Background(), deps)
@@ -176,6 +273,9 @@ func TestRun_HandlerConstructionFailure(t *testing.T) {
 	if !rt.closed {
 		t.Fatal("expected runtime to be closed when handler construction fails")
 	}
+	if tel.shutdownCalls != 1 {
+		t.Fatalf("expected telemetry shutdown to be called once when handler construction fails, got %d", tel.shutdownCalls)
+	}
 	if serverStarted {
 		t.Fatal("expected server not to be started when handler construction fails")
 	}
@@ -183,21 +283,18 @@ func TestRun_HandlerConstructionFailure(t *testing.T) {
 
 // Handler construction failure with real httpingress.NewHandler(nil)
 func TestRun_RealHandlerConstructionFailure(t *testing.T) {
+	tel := &fakeTelemetry{}
 	rt := &fakeRuntime{enforcer: nil}
 
-	deps := serverDeps{
-		loadConfig: func() (runtime.Config, error) {
-			return runtime.Config{}, nil
-		},
-		newRuntime: func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
-			return rt, nil
-		},
-		newHandler: func(enforcer *pep.Enforcer) (http.Handler, error) {
-			return httpingress.NewHandler(enforcer)
-		},
-		newServer: func(addr string, h http.Handler) httpServer {
-			return nil
-		},
+	deps := baseTestDeps()
+	deps.newTelemetry = func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+		return tel, nil
+	}
+	deps.newRuntime = func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
+		return rt, nil
+	}
+	deps.newHandler = func(enforcer *pep.Enforcer) (http.Handler, error) {
+		return httpingress.NewHandler(enforcer)
 	}
 
 	err := runWithDeps(context.Background(), deps)
@@ -206,6 +303,9 @@ func TestRun_RealHandlerConstructionFailure(t *testing.T) {
 	}
 	if !rt.closed {
 		t.Fatal("expected runtime to be closed on real handler construction failure")
+	}
+	if tel.shutdownCalls != 1 {
+		t.Fatalf("expected telemetry shutdown to be called once on real handler failure, got %d", tel.shutdownCalls)
 	}
 }
 
@@ -240,11 +340,16 @@ func TestDefaultNewServer_Configuration(t *testing.T) {
 }
 
 // E. Graceful shutdown ordering — CRITICAL:
-// Assert: server Shutdown BEFORE runtime Close
+// Assert: server.Shutdown -> wait ListenAndServe exit -> runtime.Close -> telemetry.Shutdown
 func TestRun_GracefulShutdownOrdering(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var actions []string
 	var actionMu sync.Mutex
+
+	tel := &fakeTelemetry{
+		actions:  &actions,
+		actionMu: &actionMu,
+	}
 
 	rt := &fakeRuntime{
 		actions:  &actions,
@@ -258,20 +363,15 @@ func TestRun_GracefulShutdownOrdering(t *testing.T) {
 		actionMu:   &actionMu,
 	}
 
-	deps := serverDeps{
-		loadConfig: func() (runtime.Config, error) {
-			return runtime.Config{}, nil
-		},
-		newRuntime: func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
-			return rt, nil
-		},
-		newHandler: func(enforcer *pep.Enforcer) (http.Handler, error) {
-			return http.NotFoundHandler(), nil
-		},
-		newServer: func(addr string, h http.Handler) httpServer {
-			return srv
-		},
-		shutdownTimeout: 5 * time.Second,
+	deps := baseTestDeps()
+	deps.newTelemetry = func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+		return tel, nil
+	}
+	deps.newRuntime = func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
+		return rt, nil
+	}
+	deps.newServer = func(addr string, h http.Handler) httpServer {
+		return srv
 	}
 
 	done := make(chan error, 1)
@@ -296,12 +396,16 @@ func TestRun_GracefulShutdownOrdering(t *testing.T) {
 
 	shutdownCompleteIdx := -1
 	runtimeCloseIdx := -1
+	telemetryShutdownIdx := -1
 	for i, a := range actions {
 		if a == "server:shutdown:complete" {
 			shutdownCompleteIdx = i
 		}
 		if a == "runtime:close" {
 			runtimeCloseIdx = i
+		}
+		if a == "telemetry:shutdown" {
+			telemetryShutdownIdx = i
 		}
 	}
 
@@ -311,17 +415,32 @@ func TestRun_GracefulShutdownOrdering(t *testing.T) {
 	if runtimeCloseIdx == -1 {
 		t.Fatal("runtime:close was not recorded")
 	}
+	if telemetryShutdownIdx == -1 {
+		t.Fatal("telemetry:shutdown was not recorded")
+	}
+
 	if shutdownCompleteIdx >= runtimeCloseIdx {
-		t.Fatalf("expected server shutdown to complete BEFORE runtime close, but actions were: %v", actions)
+		t.Fatalf("expected server shutdown before runtime close: actions=%v", actions)
+	}
+	if runtimeCloseIdx >= telemetryShutdownIdx {
+		t.Fatalf("expected runtime close before telemetry shutdown: actions=%v", actions)
+	}
+	if tel.shutdownCalls != 1 {
+		t.Fatalf("expected telemetry shutdown to be called exactly once, got %d", tel.shutdownCalls)
 	}
 }
 
 // F. Shutdown failure:
-// If Shutdown fails: force Close called; runtime still closes; run returns failure.
+// If Shutdown fails: force Close called; runtime still closes; telemetry shuts down; run returns failure.
 func TestRun_ShutdownFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var actions []string
 	var actionMu sync.Mutex
+
+	tel := &fakeTelemetry{
+		actions:  &actions,
+		actionMu: &actionMu,
+	}
 
 	rt := &fakeRuntime{
 		actions:  &actions,
@@ -336,20 +455,15 @@ func TestRun_ShutdownFailure(t *testing.T) {
 		actionMu:    &actionMu,
 	}
 
-	deps := serverDeps{
-		loadConfig: func() (runtime.Config, error) {
-			return runtime.Config{}, nil
-		},
-		newRuntime: func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
-			return rt, nil
-		},
-		newHandler: func(enforcer *pep.Enforcer) (http.Handler, error) {
-			return http.NotFoundHandler(), nil
-		},
-		newServer: func(addr string, h http.Handler) httpServer {
-			return srv
-		},
-		shutdownTimeout: 5 * time.Second,
+	deps := baseTestDeps()
+	deps.newTelemetry = func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+		return tel, nil
+	}
+	deps.newRuntime = func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
+		return rt, nil
+	}
+	deps.newServer = func(addr string, h http.Handler) httpServer {
+		return srv
 	}
 
 	done := make(chan error, 1)
@@ -375,11 +489,65 @@ func TestRun_ShutdownFailure(t *testing.T) {
 	if !rt.closed {
 		t.Fatal("expected runtime.Close() to be called on shutdown failure")
 	}
+	if tel.shutdownCalls != 1 {
+		t.Fatalf("expected telemetry shutdown called once, got %d", tel.shutdownCalls)
+	}
+}
+
+// Telemetry shutdown failure:
+// If telemetry shutdown fails: ErrShutdownFailed returned.
+func TestRun_TelemetryShutdownFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	tel := &fakeTelemetry{
+		shutdownErr: errors.New("telemetry shutdown timeout"),
+	}
+	rt := &fakeRuntime{}
+	srv := &fakeServer{
+		listenErr:  http.ErrServerClosed,
+		listenDone: make(chan struct{}),
+	}
+
+	deps := baseTestDeps()
+	deps.newTelemetry = func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+		return tel, nil
+	}
+	deps.newRuntime = func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
+		return rt, nil
+	}
+	deps.newServer = func(addr string, h http.Handler) httpServer {
+		return srv
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDeps(ctx, deps)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrShutdownFailed) {
+			t.Fatalf("expected ErrShutdownFailed on telemetry shutdown error, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runWithDeps timed out")
+	}
+
+	if !rt.closed {
+		t.Fatal("expected runtime.Close() to be called")
+	}
+	if tel.shutdownCalls != 1 {
+		t.Fatalf("expected telemetry shutdown called once, got %d", tel.shutdownCalls)
+	}
 }
 
 // G. Serve failure:
-// Non-http.ErrServerClosed: runtime closes; sanitized failure returned.
+// Non-http.ErrServerClosed: runtime closes; telemetry shuts down; sanitized failure returned.
 func TestRun_ServeFailure(t *testing.T) {
+	tel := &fakeTelemetry{}
 	rt := &fakeRuntime{}
 	listenDone := make(chan struct{})
 	close(listenDone)
@@ -389,19 +557,15 @@ func TestRun_ServeFailure(t *testing.T) {
 		listenDone: listenDone,
 	}
 
-	deps := serverDeps{
-		loadConfig: func() (runtime.Config, error) {
-			return runtime.Config{}, nil
-		},
-		newRuntime: func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
-			return rt, nil
-		},
-		newHandler: func(enforcer *pep.Enforcer) (http.Handler, error) {
-			return http.NotFoundHandler(), nil
-		},
-		newServer: func(addr string, h http.Handler) httpServer {
-			return srv
-		},
+	deps := baseTestDeps()
+	deps.newTelemetry = func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+		return tel, nil
+	}
+	deps.newRuntime = func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
+		return rt, nil
+	}
+	deps.newServer = func(addr string, h http.Handler) httpServer {
+		return srv
 	}
 
 	err := runWithDeps(context.Background(), deps)
@@ -411,12 +575,16 @@ func TestRun_ServeFailure(t *testing.T) {
 	if !rt.closed {
 		t.Fatal("expected runtime to be closed when serve fails")
 	}
+	if tel.shutdownCalls != 1 {
+		t.Fatalf("expected telemetry shutdown called once, got %d", tel.shutdownCalls)
+	}
 }
 
 // H. Normal server close:
 // Expected http.ErrServerClosed during shutdown must not be treated as an unrelated failure.
 func TestRun_NormalServerClose(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	tel := &fakeTelemetry{}
 	rt := &fakeRuntime{}
 
 	srv := &fakeServer{
@@ -424,20 +592,15 @@ func TestRun_NormalServerClose(t *testing.T) {
 		listenDone: make(chan struct{}),
 	}
 
-	deps := serverDeps{
-		loadConfig: func() (runtime.Config, error) {
-			return runtime.Config{}, nil
-		},
-		newRuntime: func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
-			return rt, nil
-		},
-		newHandler: func(enforcer *pep.Enforcer) (http.Handler, error) {
-			return http.NotFoundHandler(), nil
-		},
-		newServer: func(addr string, h http.Handler) httpServer {
-			return srv
-		},
-		shutdownTimeout: 5 * time.Second,
+	deps := baseTestDeps()
+	deps.newTelemetry = func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+		return tel, nil
+	}
+	deps.newRuntime = func(ctx context.Context, cfg runtime.Config) (gatewayRuntime, error) {
+		return rt, nil
+	}
+	deps.newServer = func(addr string, h http.Handler) httpServer {
+		return srv
 	}
 
 	done := make(chan error, 1)
@@ -460,6 +623,99 @@ func TestRun_NormalServerClose(t *testing.T) {
 	if !rt.closed {
 		t.Fatal("expected runtime to be closed on shutdown")
 	}
+	if tel.shutdownCalls != 1 {
+		t.Fatalf("expected telemetry shutdown called once, got %d", tel.shutdownCalls)
+	}
+}
+
+// Execution route is wrapped with telemetry, but health and readiness are not.
+func TestRun_ExecutionRouteTracedAndProbesNotTraced(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var actions []string
+	var actionMu sync.Mutex
+
+	tel := &fakeTelemetry{
+		actions:  &actions,
+		actionMu: &actionMu,
+	}
+
+	capturedRoutesChan := make(chan http.Handler, 1)
+	srv := &fakeServer{
+		listenErr:  http.ErrServerClosed,
+		listenDone: make(chan struct{}),
+	}
+
+	deps := baseTestDeps()
+	deps.newTelemetry = func(ctx context.Context, cfg telemetry.Config) (gatewayTelemetry, error) {
+		return tel, nil
+	}
+	deps.newHandler = func(enforcer *pep.Enforcer) (http.Handler, error) {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}), nil
+	}
+	deps.newServer = func(addr string, h http.Handler) httpServer {
+		capturedRoutesChan <- h
+		return srv
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDeps(ctx, deps)
+	}()
+
+	var capturedRoutes http.Handler
+	select {
+	case capturedRoutes = <-capturedRoutesChan:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for server routes handler")
+	}
+
+	// 1. POST /v1/executions must pass through telemetry wrapper
+	wExec := httptest.NewRecorder()
+	reqExec := httptest.NewRequest("POST", "/v1/executions", nil)
+	capturedRoutes.ServeHTTP(wExec, reqExec)
+
+	actionMu.Lock()
+	execCount := 0
+	for _, a := range actions {
+		if a == "telemetry:wrap:serve" {
+			execCount++
+		}
+	}
+	actionMu.Unlock()
+
+	if execCount != 1 {
+		t.Fatalf("expected 1 telemetry:wrap:serve call for execution route, got %d", execCount)
+	}
+
+	// 2. GET /healthz must NOT invoke telemetry wrapper
+	wHealth := httptest.NewRecorder()
+	reqHealth := httptest.NewRequest("GET", "/healthz", nil)
+	capturedRoutes.ServeHTTP(wHealth, reqHealth)
+
+	// 3. GET /readyz must NOT invoke telemetry wrapper
+	wReady := httptest.NewRecorder()
+	reqReady := httptest.NewRequest("GET", "/readyz", nil)
+	capturedRoutes.ServeHTTP(wReady, reqReady)
+
+	actionMu.Lock()
+	finalCount := 0
+	for _, a := range actions {
+		if a == "telemetry:wrap:serve" {
+			finalCount++
+		}
+	}
+	actionMu.Unlock()
+
+	if finalCount != 1 {
+		t.Fatalf("probes must not invoke telemetry wrapper: count was %d", finalCount)
+	}
+
+	cancel()
+	<-done
 }
 
 func TestHealthReadinessRoutes(t *testing.T) {
@@ -485,7 +741,8 @@ func TestHealthReadinessRoutes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
 			executionCalls := 0
-			h := newRoutes(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { executionCalls++ }), func(ctx context.Context) error {
+			execHandler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { executionCalls++ })
+			h := newRoutes(execHandler, execHandler, func(ctx context.Context) error {
 				calls++
 				deadline, ok := ctx.Deadline()
 				if !ok || time.Until(deadline) > readinessTimeout {
@@ -530,7 +787,7 @@ func TestReadinessTimeoutAndCanceled(t *testing.T) {
 				cancel()
 			}
 			returned := false
-			h := newRoutes(http.NotFoundHandler(), func(probe context.Context) error {
+			h := newRoutes(http.NotFoundHandler(), http.NotFoundHandler(), func(probe context.Context) error {
 				<-probe.Done()
 				returned = true
 				return probe.Err()
@@ -561,17 +818,154 @@ func TestExecutionRouteDelegation(t *testing.T) {
 			direct := httptest.NewRecorder()
 			ingress.ServeHTTP(direct, req)
 			calls := 0
-			routes := newRoutes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
 				if r != req {
 					t.Fatal("execution request replaced")
 				}
 				ingress.ServeHTTP(w, r)
-			}), func(context.Context) error { t.Fatal("execution checked readiness"); return nil })
+			})
+			routes := newRoutes(handler, handler, func(context.Context) error { t.Fatal("execution checked readiness"); return nil })
 			got := httptest.NewRecorder()
 			routes.ServeHTTP(got, req)
 			if calls != 1 || got.Code != direct.Code || got.Body.String() != direct.Body.String() || got.Header().Get("Allow") != direct.Header().Get("Allow") {
 				t.Fatalf("execution ingress behavior changed: %d %q", got.Code, got.Body.String())
+			}
+		})
+	}
+}
+
+// Direct span-count and routing tests:
+// POST /v1/executions    -> exactly 1 execution span
+// GET /v1/executions     -> 0
+// HEAD /v1/executions    -> 0
+// PUT /v1/executions     -> 0
+// OPTIONS /v1/executions -> 0
+// GET /healthz           -> 0
+// GET /readyz            -> 0
+// unknown path           -> 0
+// Non-POST execution responses must still match direct ingress behavior.
+func TestRoutes_DirectSpanCountsAndIngressBehavior(t *testing.T) {
+	ingress, err := httpingress.NewHandler(&pep.Enforcer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	spansCreated := 0
+	tracedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		spansCreated++
+		ingress.ServeHTTP(w, r)
+	})
+	untracedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ingress.ServeHTTP(w, r)
+	})
+
+	routes := newRoutes(tracedHandler, untracedHandler, func(context.Context) error { return nil })
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantSpans  int
+		wantStatus int
+		wantAllow  string
+	}{
+		{
+			name:       "POST executions creates exactly 1 span",
+			method:     http.MethodPost,
+			path:       "/v1/executions",
+			wantSpans:  1,
+			wantStatus: http.StatusUnauthorized, // pep.Enforcer with nil verifier returns 401 Unauthorized
+		},
+		{
+			name:       "GET executions creates 0 spans and returns 405",
+			method:     http.MethodGet,
+			path:       "/v1/executions",
+			wantSpans:  0,
+			wantStatus: http.StatusMethodNotAllowed,
+			wantAllow:  http.MethodPost,
+		},
+		{
+			name:       "HEAD executions creates 0 spans and returns 405",
+			method:     http.MethodHead,
+			path:       "/v1/executions",
+			wantSpans:  0,
+			wantStatus: http.StatusMethodNotAllowed,
+			wantAllow:  http.MethodPost,
+		},
+		{
+			name:       "PUT executions creates 0 spans and returns 405",
+			method:     http.MethodPut,
+			path:       "/v1/executions",
+			wantSpans:  0,
+			wantStatus: http.StatusMethodNotAllowed,
+			wantAllow:  http.MethodPost,
+		},
+		{
+			name:       "OPTIONS executions creates 0 spans and returns 405",
+			method:     http.MethodOptions,
+			path:       "/v1/executions",
+			wantSpans:  0,
+			wantStatus: http.StatusMethodNotAllowed,
+			wantAllow:  http.MethodPost,
+		},
+		{
+			name:       "GET healthz creates 0 spans and returns 200",
+			method:     http.MethodGet,
+			path:       "/healthz",
+			wantSpans:  0,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "GET readyz creates 0 spans and returns 200",
+			method:     http.MethodGet,
+			path:       "/readyz",
+			wantSpans:  0,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "unknown path creates 0 spans and returns 404",
+			method:     http.MethodGet,
+			path:       "/unknown",
+			wantSpans:  0,
+			wantStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			beforeSpans := spansCreated
+
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			rec := httptest.NewRecorder()
+			routes.ServeHTTP(rec, req)
+
+			deltaSpans := spansCreated - beforeSpans
+			if deltaSpans != tc.wantSpans {
+				t.Fatalf("expected %d spans, got %d", tc.wantSpans, deltaSpans)
+			}
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d", tc.wantStatus, rec.Code)
+			}
+			if tc.wantAllow != "" && rec.Header().Get("Allow") != tc.wantAllow {
+				t.Fatalf("expected Allow: %q, got %q", tc.wantAllow, rec.Header().Get("Allow"))
+			}
+
+			// If it's an execution route, also verify against direct ingress
+			if tc.path == "/v1/executions" {
+				directRec := httptest.NewRecorder()
+				directReq := httptest.NewRequest(tc.method, tc.path, nil)
+				ingress.ServeHTTP(directRec, directReq)
+
+				if rec.Code != directRec.Code {
+					t.Fatalf("status mismatch with direct ingress: got %d, want %d", rec.Code, directRec.Code)
+				}
+				if rec.Body.String() != directRec.Body.String() {
+					t.Fatalf("body mismatch with direct ingress: got %q, want %q", rec.Body.String(), directRec.Body.String())
+				}
+				if rec.Header().Get("Allow") != directRec.Header().Get("Allow") {
+					t.Fatalf("Allow header mismatch with direct ingress: got %q, want %q", rec.Header().Get("Allow"), directRec.Header().Get("Allow"))
+				}
 			}
 		})
 	}
