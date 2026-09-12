@@ -2,7 +2,7 @@
 
 ProofMesh is an in-progress, security-focused runtime governance and execution control plane for autonomous AI agents. It decouples governance decisions from tool execution: a Spring Boot control plane acts as the Policy Decision Point (PDP) to evaluate policy, manage human approvals, and issue short-lived execution grants, while a high-performance Go gateway acts as the sole Policy Enforcement Point (PEP) to verify grants offline, enforce exact request binding, guarantee single-use replay protection, and invoke protected tools.
 
-> **Status:** Active development. Core execution-grant verification, durable PostgreSQL replay protection, exact attempt binding, protected HTTP tool execution, runtime composition, strict HTTP ingress handling, and gateway server bootstrap with graceful shutdown are implemented; operational telemetry and deployment hardening are in progress.
+> **Status:** Active development. Core execution-grant verification, durable PostgreSQL replay protection, exact attempt binding, protected HTTP tool execution, runtime composition, strict HTTP ingress handling, gateway server bootstrap with graceful shutdown, operational probes (`GET /healthz` and PostgreSQL-backed `GET /readyz`), and opt-in OpenTelemetry execution tracing are implemented; metrics and deployment hardening remain in progress.
 
 ---
 
@@ -143,12 +143,14 @@ ProofMesh enforces the following non-negotiable security invariants:
 * [x] Production runtime dependency composition (`runtime.New`)
 * [x] Typed environment configuration loader (`appconfig.Load`) with validation
 * [x] Strict execution ingress HTTP handler (`POST /v1/executions`) with bounded request bodies (1 MiB), strict JSON envelope validation, single Bearer token extraction, and sanitized HTTP error responses (`Cache-Control: no-store`)
+* [x] Operational health and readiness probes (`GET /healthz` process liveness and PostgreSQL-backed `GET /readyz`)
 
 ### Roadmap / In Progress
 * [x] Gateway standalone server bootstrap (`main.go` and network listener lifecycle)
 * [x] Graceful shutdown and OS signal handling in gateway runtime
 * [ ] Automated database migration runner for gateway deployment
-* [ ] Structured observability (OpenTelemetry distributed tracing and Prometheus metrics)
+* [x] OpenTelemetry execution tracing foundation (OTLP/HTTP, TraceContext, POST `/v1/executions`)
+* [ ] Metrics / Prometheus observability
 * [ ] Execution audit log archival and automated retention policies
 * [ ] Dynamic service discovery for downstream tool endpoints
 
@@ -243,11 +245,17 @@ Content-Type: application/json
 * **502 Bad Gateway:** Downstream tool execution failed or returned a non-2xx status (`{"error":"bad_gateway"}`).
 * **503 Service Unavailable:** Execution authority database connection unavailable (`{"error":"service_unavailable"}`).
 
+### Operational Endpoints
+
+In addition to protected tool execution, the gateway exposes unauthenticated operational endpoints:
+* **`GET /healthz`**: Process-local liveness probe returning HTTP 200 (`{"status":"ok"}`). Untraced and does not touch dependencies.
+* **`GET /readyz`**: Dependency readiness probe checking PostgreSQL availability (`{"status":"ready"}` or `{"status":"not_ready"}`). Untraced; checks PostgreSQL only in the current slice.
+
 ---
 
 ## Configuration
 
-The gateway's typed configuration loader (`appconfig.Load`) reads and validates five required environment variables:
+The gateway's typed configuration loader (`appconfig.Load`) reads and validates required and optional environment variables:
 
 | Environment Variable | Required | Description | Example (Development Only) |
 | :--- | :--- | :--- | :--- |
@@ -256,6 +264,7 @@ The gateway's typed configuration loader (`appconfig.Load`) reads and validates 
 | `PROOFMESH_EXECUTION_GRANT_AUDIENCE` | Yes | Expected audience claim (`aud`) in signed execution grants. | `proofmesh-gateway` |
 | `PROOFMESH_JWKS_URL` | Yes | HTTP endpoint serving public keys for offline ES256 verification. | `http://localhost:8080/.well-known/jwks.json` |
 | `PROOFMESH_TOOL_TARGETS_JSON` | Yes | JSON array mapping `tool_name` + `operation_name` pairs to trusted backend URLs. | See example below |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | Optional OTLP/HTTP base endpoint for gateway tracing. When omitted/blank, tracing is disabled. Traces are exported to `<base>/v1/traces`. | `http://localhost:4318` |
 
 ### Example `PROOFMESH_TOOL_TARGETS_JSON`
 
@@ -310,7 +319,7 @@ cd apps/control-plane && ./mvnw spring-boot:run -Dspring-boot.run.profiles=local
 
 ### 3. Gateway Runtime
 
-The Go gateway runtime composition, offline verifier, durable PostgreSQL replay authority, protected HTTP tool executor, and HTTP ingress handler are fully implemented and verified via unit and integration tests. Standalone process bootstrapping (`main.go`) with `http.Server` lifecycle orchestration and graceful OS signal shutdown is implemented; the project remains under active development for operational and deployment hardening.
+The Go gateway runtime composition, offline verifier, durable PostgreSQL replay authority, protected HTTP tool executor, and HTTP ingress handler are fully implemented and verified via unit and integration tests. Standalone process bootstrapping (`main.go`) with `http.Server` lifecycle orchestration, graceful OS signal shutdown, operational health/readiness probes (`GET /healthz` and PostgreSQL-backed `GET /readyz`), and opt-in OpenTelemetry execution tracing are implemented. Tracing targets `POST /v1/executions` only with W3C TraceContext propagation (health and readiness probes are not traced). The project remains under active development for metrics, Prometheus observability, and deployment hardening.
 
 ---
 
