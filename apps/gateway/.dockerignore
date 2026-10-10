@@ -1,0 +1,30 @@
+# Include only the source required to build the two commands and embedded SQL.
+**
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!migrations/
+!migrations/**
+
+# Exclude local or sensitive artifacts even if placed inside source directories.
+**/.git
+**/.DS_Store
+**/.idea
+**/.vscode
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.test
+**/*.out
+**/coverage*
+**/*.tmp
+**/bin
+**/AGENTS.md
+**/prompts
+**/docs/ai
