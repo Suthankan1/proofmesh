@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -968,5 +969,40 @@ func TestRoutes_DirectSpanCountsAndIngressBehavior(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunMetricsWiring(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps := baseTestDeps()
+	captured := make(chan http.Handler, 1)
+	srv := &fakeServer{listenErr: http.ErrServerClosed, listenDone: make(chan struct{})}
+	deps.newServer = func(_ string, h http.Handler) httpServer { captured <- h; return srv }
+	done := make(chan error, 1)
+	go func() { done <- runWithDeps(ctx, deps) }()
+	var routes http.Handler
+	select {
+	case routes = <-captured:
+	case <-time.After(3 * time.Second):
+		t.Fatal("routes not initialized")
+	}
+	for _, path := range []string{"/healthz", "/readyz"} {
+		routes.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", path, nil))
+	}
+	routes.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/executions", nil))
+	w := httptest.NewRecorder()
+	routes.ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `proofmesh_gateway_execution_requests_total{status_class="4xx"} 1`) || !strings.Contains(w.Body.String(), "execution_duration_seconds_count 1") {
+		t.Fatalf("metrics not wired: %d %s", w.Code, w.Body.String())
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown timed out")
 	}
 }

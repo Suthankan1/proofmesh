@@ -12,6 +12,7 @@ import (
 
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/appconfig"
 	httpingress "github.com/Suthankan1/proofmesh/apps/gateway/internal/ingress/http"
+	"github.com/Suthankan1/proofmesh/apps/gateway/internal/metrics"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/pep"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/runtime"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/telemetry"
@@ -152,8 +153,9 @@ func runWithDeps(ctx context.Context, deps serverDeps) error {
 		return ErrHandlerInitFailed
 	}
 
-	wrappedExecution := tel.WrapExecutionHandler(handler)
-	srv := deps.newServer(defaultListenAddress, newRoutes(wrappedExecution, handler, rt.Ready))
+	measurements := metrics.New()
+	wrappedExecution := measurements.WrapExecutionHandler(tel.WrapExecutionHandler(handler))
+	srv := deps.newServer(defaultListenAddress, measurements.Routes(newRoutes(wrappedExecution, handler, rt.Ready)))
 	shutdownTimeout := deps.shutdownTimeout
 	if shutdownTimeout <= 0 {
 		shutdownTimeout = defaultShutdownTimeout
