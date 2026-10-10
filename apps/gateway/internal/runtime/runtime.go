@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	postgres "github.com/Suthankan1/proofmesh/apps/gateway/internal/executionauthority/postgres"
+	"github.com/Suthankan1/proofmesh/apps/gateway/internal/executionevidence"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/executiongrant"
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/pep"
 	httpexecutor "github.com/Suthankan1/proofmesh/apps/gateway/internal/toolexecutor/http"
@@ -88,11 +89,6 @@ func newRuntime(ctx context.Context, cfg Config, deps runtimeDeps) (*Runtime, er
 	}
 
 	executorFactory := deps.executorFactory
-	if executorFactory == nil {
-		executorFactory = func(targets []httpexecutor.Target, tr http.RoundTripper, pol httpexecutor.Policy) (pep.ToolExecutor, error) {
-			return httpexecutor.NewExecutor(targets, tr, pol)
-		}
-	}
 
 	resolverFactory := deps.resolverFactory
 	if resolverFactory == nil {
@@ -143,6 +139,20 @@ func newRuntime(ctx context.Context, cfg Config, deps runtimeDeps) (*Runtime, er
 		return nil, ErrAuthorityInitialization
 	}
 
+	// Production execution requires durable intent/outcome evidence; injected test factories remain explicit seams.
+	if executorFactory == nil {
+		executorFactory = func(targets []httpexecutor.Target, tr http.RoundTripper, pol httpexecutor.Policy) (pep.ToolExecutor, error) {
+			tool, err := httpexecutor.NewExecutor(targets, tr, pol)
+			if err != nil {
+				return nil, err
+			}
+			store, err := executionevidence.NewPostgresStore(pool)
+			if err != nil {
+				return nil, err
+			}
+			return executionevidence.NewExecutor(store, tool)
+		}
+	}
 	// 4. Construct HTTP ToolExecutor with defensively snapshotted targets
 	targetsCopy := make([]httpexecutor.Target, len(cfg.ToolTargets))
 	copy(targetsCopy, cfg.ToolTargets)

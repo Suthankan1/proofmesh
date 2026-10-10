@@ -5,16 +5,20 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/Suthankan1/proofmesh/apps/gateway/internal/dbmigrate"
+	"github.com/Suthankan1/proofmesh/apps/gateway/migrations"
+	"github.com/pressly/goose/v3"
 )
 
 var testConnStr string
@@ -250,8 +254,8 @@ func TestIntegration_SerialIdempotency(t *testing.T) {
 
 	var maxVersion int64
 	err = db.QueryRowContext(ctx, "SELECT MAX(version_id) FROM goose_db_version WHERE is_applied = true").Scan(&maxVersion)
-	if err != nil || maxVersion != 1 {
-		t.Fatalf("expected max version 1 after rerun, max=%d, err=%v", maxVersion, err)
+	if err != nil || maxVersion != 2 {
+		t.Fatalf("expected max version 2 after rerun, max=%d, err=%v", maxVersion, err)
 	}
 }
 
@@ -542,5 +546,71 @@ func TestIntegration_ConcurrentUpCalls(t *testing.T) {
 	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'execution_grant_claims'").Scan(&tableCount)
 	if err != nil || tableCount != 1 {
 		t.Fatalf("expected table execution_grant_claims to exist, count=%d, err=%v", tableCount, err)
+	}
+}
+
+func TestEvidenceUpgradePreservesLegacyReplayAuthority(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	admin, err := sql.Open("pgx", testConnStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	// Fresh database in this package's disposable container: no existing history is reset.
+	name := fmt.Sprintf("evidence_upgrade_%d", time.Now().UnixNano())
+	if _, err := admin.ExecContext(ctx, `CREATE DATABASE "`+name+`"`); err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(testConnStr)
+	if err != nil {
+		t.Fatal("invalid test database URL")
+	}
+	u.Path = "/" + name
+	db, err := sql.Open("pgx", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	first, err := migrations.FS.ReadFile("0001_create_execution_grant_claims.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, fstest.MapFS{
+		"0001_create_execution_grant_claims.sql": &fstest.MapFile{Data: first},
+	}, goose.WithLogger(goose.NopLogger()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	const id = "11111111-1111-4111-8111-111111111111"
+	_, err = db.ExecContext(ctx, `INSERT INTO execution_grant_claims(grant_id,organization_id,agent_id,governed_action_id,
+ governance_decision_id,tool_name,operation_name,payload_hash,expires_at) VALUES ($1,$1,$1,$1,$1,'tool','operation',$2,now()+interval '1 hour')`, id, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbmigrate.Run(ctx, u.String()); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := db.QueryRowContext(ctx, "SELECT execution_status FROM execution_grant_claims WHERE grant_id=$1", id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "LEGACY_UNKNOWN" {
+		t.Fatalf("legacy admission mislabeled %s", status)
+	}
+	tag, err := db.ExecContext(ctx, `INSERT INTO execution_grant_claims(grant_id,organization_id,agent_id,governed_action_id,
+ governance_decision_id,tool_name,operation_name,payload_hash,expires_at) VALUES ($1,$1,$1,$1,$1,'tool','operation',$2,now()+interval '1 hour') ON CONFLICT(grant_id) DO NOTHING`, id, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := tag.RowsAffected()
+	if err != nil || count != 0 {
+		t.Fatal("legacy replay authority lost")
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE execution_grant_claims SET execution_status='STARTED',started_at=now() WHERE grant_id=$1", id); err == nil {
+		t.Fatal("legacy history rewritten")
 	}
 }

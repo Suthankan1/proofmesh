@@ -1,6 +1,7 @@
 package com.proofmesh.controlplane;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.proofmesh.controlplane.approval.*;
 import com.proofmesh.controlplane.decision.DecisionOutcome;
@@ -44,6 +45,7 @@ class CrossServiceGovernanceIntegrationTest {
     private final UUID organizationId = UUID.randomUUID();
     private final UUID agentId = UUID.randomUUID();
     private final AtomicInteger toolCalls = new AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicBoolean toolFailure = new java.util.concurrent.atomic.AtomicBoolean();
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
     private HttpServer tool;
     private Process gateway;
@@ -93,7 +95,7 @@ class CrossServiceGovernanceIntegrationTest {
             byte[] body = exchange.getRequestBody().readAllBytes();
             byte[] reply = Arrays.equals(body, PAYLOAD.getBytes(StandardCharsets.UTF_8))
                     ? "accepted".getBytes(StandardCharsets.UTF_8) : "wrong-payload".getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, reply.length);
+            exchange.sendResponseHeaders(toolFailure.get() ? 503 : 200, reply.length);
             try (var output = exchange.getResponseBody()) { output.write(reply); }
             exchange.close();
         });
@@ -169,6 +171,19 @@ class CrossServiceGovernanceIntegrationTest {
         assertThat(toolCalls).hasValue(1);
         assertThat(jdbc.queryForObject("SELECT count(*) FROM public.execution_grant_claims WHERE governed_action_id=?",
                 Integer.class, action.id())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT execution_status FROM public.execution_grant_claims WHERE governed_action_id=?",
+                String.class, action.id())).isEqualTo("RESULT_RECEIVED");
+        assertThat(jdbc.queryForObject("SELECT response_bytes FROM public.execution_grant_claims WHERE governed_action_id=?",
+                Long.class, action.id())).isEqualTo(8L);
+        assertThat(jdbc.queryForObject("SELECT response_hash FROM public.execution_grant_claims WHERE governed_action_id=?",
+                String.class, action.id())).isEqualTo(java.util.HexFormat.of().formatHex(
+                        java.security.MessageDigest.getInstance("SHA-256").digest("accepted".getBytes(StandardCharsets.UTF_8))));
+        assertThatThrownBy(() -> jdbc.update("UPDATE public.execution_grant_claims SET execution_status='STARTED' WHERE governed_action_id=?", action.id()))
+                .isInstanceOf(org.springframework.dao.DataAccessException.class);
+        assertThatThrownBy(() -> jdbc.update("UPDATE public.execution_grant_claims SET agent_id=? WHERE governed_action_id=?", UUID.randomUUID(), action.id()))
+                .isInstanceOf(org.springframework.dao.DataAccessException.class);
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM public.execution_grant_claims WHERE governed_action_id=?", action.id()))
+                .isInstanceOf(org.springframework.dao.DataAccessException.class);
     }
 
     @Test
@@ -223,6 +238,21 @@ class CrossServiceGovernanceIntegrationTest {
         assertThat(approved.isApprovedAndValidAt(Instant.now())).isFalse();
         assertThat(issuer.issue(organizationId, action.id())).isInstanceOf(ExecutionGrantIssuanceResult.Ineligible.class);
         assertThat(toolCalls).hasValue(0);
+    }
+
+    @Test
+    void unsuccessfulToolResponseRecordsUnknownAndStillSpendsGrant() throws Exception {
+        var action = actionWithPolicy(PolicyEffect.ALLOW);
+        var governed = govern(action, Instant.now());
+        String token = token(action);
+        toolFailure.set(true);
+        assertThat(execute(action, governed, token, PAYLOAD).statusCode()).isEqualTo(502);
+        assertThat(jdbc.queryForObject("SELECT execution_status FROM public.execution_grant_claims WHERE governed_action_id=?",
+                String.class, action.id())).isEqualTo("UNKNOWN");
+        assertThat(jdbc.queryForObject("SELECT response_hash FROM public.execution_grant_claims WHERE governed_action_id=?",
+                String.class, action.id())).isNull();
+        assertThat(execute(action, governed, token, PAYLOAD).statusCode()).isEqualTo(409);
+        assertThat(toolCalls).hasValue(1);
     }
 
     private GovernedAction actionWithPolicy(PolicyEffect effect) {
