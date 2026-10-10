@@ -1,0 +1,7 @@
+# Local cross-service governance tests
+
+Run `bash scripts/test-local-governance.sh` from a checkout with Java 25, Go (see `apps/gateway/go.mod`) and Docker available. The runner builds a temporary test host and runs the opt-in Spring test. It uses a disposable PostgreSQL Testcontainers database, generated temporary P-256 keys and ephemeral loopback HTTP ports. It never connects to the Compose development database or deploys services.
+
+The test exercises real Spring governance/approval/issuance services, Spring HTTP JWKS, the production Go runtime and execution ingress, durable PostgreSQL claims, and a local controlled HTTP tool. It covers denial, pending/rejected/expired approvals, canonical payload identity, exact approved retry and single-use replay across a gateway process restart. Each operation uses its own service transaction, as separate runtime and human requests would. Random tenant fixtures and durable claims disappear with the disposable test database. No destructive lifecycle cleanup is performed.
+
+This proves the service-to-execution boundary. It does not claim an authenticated agent submission API or a browser operator flow: those adapters remain separate work. Ordinary Java verification skips this explicitly opt-in test; run this command for cross-language verification. No execution grants, private keys or payloads are printed by the host. Keys and host processes are cleaned up on ordinary test completion.
