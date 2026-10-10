@@ -2,7 +2,7 @@
 
 ProofMesh is an in-progress, security-focused runtime governance and execution control plane for autonomous AI agents. It decouples governance decisions from tool execution: a Spring Boot control plane acts as the Policy Decision Point (PDP) to evaluate policy, manage human approvals, and issue short-lived execution grants, while a high-performance Go gateway acts as the sole Policy Enforcement Point (PEP) to verify grants offline, enforce exact request binding, guarantee single-use replay protection, and invoke protected tools.
 
-> **Status:** Active development. Core execution-grant verification, durable PostgreSQL replay protection, exact attempt binding, protected HTTP tool execution, runtime composition, strict HTTP ingress handling, gateway server bootstrap with graceful shutdown, dedicated one-shot gateway database migration runner, operational probes (`GET /healthz` and PostgreSQL-backed `GET /readyz`), opt-in OpenTelemetry execution tracing, bounded gateway Prometheus metrics, digest-pinned non-root OCI images, and an explicit Kubernetes migration-before-rollout helper are implemented. Audit archival, target-cluster validation, and broader release/deployment hardening remain in progress.
+> **Status:** Active local-only development. Spring governance/approval/grant services, the Go execution gateway, durable replay protection, execution-outcome evidence, probes, tracing, Prometheus metrics and hardened local container artifacts are implemented. Real Spring-issued grants are verified through the gateway and PostgreSQL in opt-in cross-service tests. A tenant-bound, hash-only agent credential service is implemented; authenticated runtime submission, human approval HTTP adapters, archive-copy evidence export and the final operator/demo flow remain unfinished. Cloud deployment is outside the current project scope.
 
 ---
 
@@ -338,7 +338,7 @@ go run ./cmd/migrate
 
 ### 4. Gateway Runtime
 
-The Go gateway runtime composition, offline verifier, durable PostgreSQL replay authority, protected HTTP tool executor, and HTTP ingress handler are fully implemented and verified via unit and integration tests. Standalone process bootstrapping (`main.go`) with `http.Server` lifecycle orchestration, graceful OS signal shutdown, operational health/readiness probes (`GET /healthz` and PostgreSQL-backed `GET /readyz`), and opt-in OpenTelemetry execution tracing are implemented. Tracing targets `POST /v1/executions` only with W3C TraceContext propagation (health and readiness probes are not traced). Normal gateway startup does not auto-run migrations, and `GET /readyz` checks PostgreSQL reachability only. Separate digest-pinned non-root OCI targets, a migration-gated Kubernetes release helper, and gateway Prometheus metrics are implemented. Live-cluster validation, secret rotation, ingress/network controls, audit archival, and broader release hardening remain in progress.
+The Go gateway runtime composition, offline verifier, durable PostgreSQL replay authority, protected HTTP tool executor, and HTTP ingress handler are fully implemented and verified via unit and integration tests. Standalone process bootstrapping (`main.go`) with `http.Server` lifecycle orchestration, graceful OS signal shutdown, operational health/readiness probes (`GET /healthz` and PostgreSQL-backed `GET /readyz`), and opt-in OpenTelemetry execution tracing are implemented. Tracing targets `POST /v1/executions` only with W3C TraceContext propagation (health and readiness probes are not traced). Normal gateway startup does not auto-run migrations, and `GET /readyz` checks PostgreSQL reachability only. Separate digest-pinned non-root OCI targets and gateway Prometheus metrics are implemented. Migration 0002 adds durable invocation intent and observed outcome evidence: received results retain only their SHA-256 and length; failures remain explicitly unknown and cannot release a spent grant. See [execution evidence](docs/operations/execution-evidence.md). Historical Kubernetes helpers remain in the repository, but deployment and target-cluster work are outside the current local-only scope.
 
 
 ### Container artifacts and release workflow
@@ -414,6 +414,18 @@ The control plane test suite verifies:
 * Flyway forward migration application on PostgreSQL Testcontainers
 
 ---
+
+### Cross-service local governance tests
+
+```bash
+bash scripts/test-local-governance.sh
+```
+
+This opt-in suite uses disposable PostgreSQL, temporary P-256 signing keys, the real Spring HTTP JWKS endpoint, production Go runtime/ingress and a local controlled tool. It verifies canonical payload identity, denial and approval eligibility, approved exact retry, replay across a gateway restart, outcome evidence and failed-tool ambiguity. See [local test details](docs/engineering/local-governance-tests.md).
+
+Agent credentials contain 256 random bits, with only their SHA-256 stored. Tenant-scoped rotation, expiry, revocation and disabled/suspended identity checks are tested, including concurrent rotation. See [credential boundary and remaining adapters](docs/security/agent-credentials.md). The service does not yet expose HTTP provisioning or runtime authentication.
+
+Current verification: 595 ordinary Java tests passed in randomized class order; six opt-in cross-service tests passed separately. Go dependency verification, static analysis and the complete race suite passed; the version-1-to-2 gateway migration preserves historical replay claims without inventing old execution outcomes. These results do not establish a completed operator UI or full agent submission flow.
 
 ## Project Status
 
