@@ -18,10 +18,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Java 25
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "25"
@@ -43,10 +43,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: apps/gateway/go.mod
           cache-dependency-path: apps/gateway/go.sum
@@ -56,3 +56,18 @@ jobs:
           go mod verify
           go vet ./...
           go test -race ./...
+
+  operations:
+    name: Deployment gate and hardened images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify migration-before-rollout gate
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s infrastructure/kubernetes -p 'test_*.py'
+      - name: Build separate runtime artifacts
+        run: |
+          docker build --target gateway-runtime -t proofmesh-gateway:ci apps/gateway
+          docker build --target migrate-runtime -t proofmesh-migrate:ci apps/gateway
+      - name: Verify image security and failure smokes
+        run: python3 scripts/verify-gateway-images.py proofmesh-gateway:ci proofmesh-migrate:ci
