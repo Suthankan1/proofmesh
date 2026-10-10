@@ -1,0 +1,9 @@
+# Agent credential foundation
+
+Agents use per-agent opaque bearer credentials independently of human Keycloak/OIDC identity. Each credential contains 256 bits from JDK SecureRandom and has a strict `pm_agent_` URL-safe form. PostgreSQL stores only SHA-256 of the high-entropy credential, never plaintext. This is not password hashing; credentials must be generated, not chosen by users.
+
+The application service rotates a credential only for an active agent in an active, exact organization. Rotation locks the scoped agent and organization rows, revokes the previous credential and stores the new digest in one transaction. A partial unique index also limits each scoped agent to one unrevoked credential. The tenant binding is a composite database foreign key. Revoked rows are retained. Validity must be explicit, positive and at most 90 days; there is no perpetual credential.
+
+Authentication derives the organization and agent from the digest's database row and checks expiry, revocation and current agent/organization status. Client-supplied tenant or agent identifiers are not identity evidence. Database errors propagate so a transport adapter must reject authentication on infrastructure failure. Never log the bearer credential; the issuance value's string representation is redacted.
+
+This slice implements the service and storage boundary, not HTTP authentication or administrative provisioning endpoints. Future rotation APIs must enforce PLATFORM_ADMIN and derive tenant context from verified human identity; future runtime APIs must use the authenticated agent identity and must not accept risk, timing or grant eligibility assertions from the caller. Plaintext may be returned exactly once to an authorized issuer, with no-store response caching and redacted application logs. Use loopback-only HTTP for local development and authenticated TLS on any non-loopback network.
