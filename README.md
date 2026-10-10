@@ -2,7 +2,7 @@
 
 ProofMesh is an in-progress, security-focused runtime governance and execution control plane for autonomous AI agents. It decouples governance decisions from tool execution: a Spring Boot control plane acts as the Policy Decision Point (PDP) to evaluate policy, manage human approvals, and issue short-lived execution grants, while a high-performance Go gateway acts as the sole Policy Enforcement Point (PEP) to verify grants offline, enforce exact request binding, guarantee single-use replay protection, and invoke protected tools.
 
-> **Status:** Active development. Core execution-grant verification, durable PostgreSQL replay protection, exact attempt binding, protected HTTP tool execution, runtime composition, strict HTTP ingress handling, gateway server bootstrap with graceful shutdown, dedicated one-shot gateway database migration runner, operational probes (`GET /healthz` and PostgreSQL-backed `GET /readyz`), and opt-in OpenTelemetry execution tracing are implemented; metrics and deployment hardening remain in progress.
+> **Status:** Active development. Core execution-grant verification, durable PostgreSQL replay protection, exact attempt binding, protected HTTP tool execution, runtime composition, strict HTTP ingress handling, gateway server bootstrap with graceful shutdown, dedicated one-shot gateway database migration runner, operational probes (`GET /healthz` and PostgreSQL-backed `GET /readyz`), opt-in OpenTelemetry execution tracing, bounded gateway Prometheus metrics, digest-pinned non-root OCI images, and an explicit Kubernetes migration-before-rollout helper are implemented. Audit archival, target-cluster validation, and broader release/deployment hardening remain in progress.
 
 ---
 
@@ -150,11 +150,12 @@ ProofMesh enforces the following non-negotiable security invariants:
 * [x] Gateway standalone server bootstrap (`main.go` and network listener lifecycle)
 * [x] Graceful shutdown and OS signal handling in gateway runtime
 * [x] Dedicated one-shot gateway database migration runner
-* [ ] Deployment orchestration/integration for migration step
+* [x] Explicit Kubernetes gateway release helper gated on a new successful one-shot migration Job (target-cluster validation pending)
 * [x] OpenTelemetry execution tracing foundation (OTLP/HTTP, TraceContext, POST `/v1/executions`)
-* [ ] Metrics / Prometheus observability
+* [x] Gateway Prometheus execution HTTP metrics (`GET /metrics`, bounded status classes, latency, in-flight requests)
+* [x] Separate digest-pinned non-root gateway/migration OCI images and CI artifact checks
 * [ ] Execution audit log archival and automated retention policies
-* [ ] Dynamic service discovery for downstream tool endpoints
+* [ ] Dynamic service discovery for downstream tool endpoints (future scope; current releases retain trusted static routing)
 
 ---
 
@@ -337,7 +338,38 @@ go run ./cmd/migrate
 
 ### 4. Gateway Runtime
 
-The Go gateway runtime composition, offline verifier, durable PostgreSQL replay authority, protected HTTP tool executor, and HTTP ingress handler are fully implemented and verified via unit and integration tests. Standalone process bootstrapping (`main.go`) with `http.Server` lifecycle orchestration, graceful OS signal shutdown, operational health/readiness probes (`GET /healthz` and PostgreSQL-backed `GET /readyz`), and opt-in OpenTelemetry execution tracing are implemented. Tracing targets `POST /v1/executions` only with W3C TraceContext propagation (health and readiness probes are not traced). Normal gateway startup does not auto-run migrations, and `GET /readyz` checks PostgreSQL reachability only. Deployment orchestration/integration, production container/Kubernetes/Terraform wiring, secret rotation, metrics, and broader deployment hardening remain in progress.
+The Go gateway runtime composition, offline verifier, durable PostgreSQL replay authority, protected HTTP tool executor, and HTTP ingress handler are fully implemented and verified via unit and integration tests. Standalone process bootstrapping (`main.go`) with `http.Server` lifecycle orchestration, graceful OS signal shutdown, operational health/readiness probes (`GET /healthz` and PostgreSQL-backed `GET /readyz`), and opt-in OpenTelemetry execution tracing are implemented. Tracing targets `POST /v1/executions` only with W3C TraceContext propagation (health and readiness probes are not traced). Normal gateway startup does not auto-run migrations, and `GET /readyz` checks PostgreSQL reachability only. Separate digest-pinned non-root OCI targets, a migration-gated Kubernetes release helper, and gateway Prometheus metrics are implemented. Live-cluster validation, secret rotation, ingress/network controls, audit archival, and broader release hardening remain in progress.
+
+
+### Container artifacts and release workflow
+
+Build separate runtime artifacts from the same reviewed repository commit:
+
+```bash
+docker build --target gateway-runtime -t proofmesh-gateway:local apps/gateway
+docker build --target migrate-runtime -t proofmesh-migrate:local apps/gateway
+python3 scripts/verify-gateway-images.py proofmesh-gateway:local proofmesh-migrate:local
+```
+
+The shared builder, minimal distroless runtimes, and Dockerfile frontend use
+immutable image digests. Final images contain only their intended application
+binary and CA trust, run as non-root, and require runtime configuration. Digest
+refreshes must be reviewed to receive security updates. Local image execution
+has been verified on ARM64; CI builds and checks its runner platform.
+
+The [gateway deployment guide](docs/operations/gateway-deployment.md) describes
+rendering and executing the explicit pre-deploy Job gate with separate migration
+and runtime credentials. A failed or preexisting migration Job prevents the
+helper from applying the gateway rollout. This is gateway deployment scaffolding;
+it does not claim a validated production cluster or provision the control plane,
+identity service, database, ingress, or secrets.
+
+The [gateway metrics guide](docs/operations/gateway-metrics.md) documents exact
+`GET /metrics`, private-registry HTTP measurements, per-replica scraping and
+required monitoring access restrictions. Metrics contain no tokens, payloads,
+identity labels, or tool names and do not replace durable execution audit
+records. Audit archival/retention is still open: immutable governance history and
+durable replay authority must be preserved.
 
 ---
 
