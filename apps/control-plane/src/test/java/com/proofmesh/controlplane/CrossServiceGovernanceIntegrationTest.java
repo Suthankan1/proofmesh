@@ -368,6 +368,51 @@ class CrossServiceGovernanceIntegrationTest {
         assertThat(toolCalls).hasValue(1);
     }
 
+    @Test
+    void evidenceExportIsTenantScopedAndContainsNoCredentialsOrPayloadBodies() throws Exception {
+        var action=actionWithPolicy(PolicyEffect.ALLOW);
+        String secret=credentials.rotate(organizationId,agentId,Duration.ofHours(1)).secret();
+        var submitted=json.readTree(submitHttp(action,secret,PAYLOAD).body());
+        assertThat(executeSubmitted(submitted,PAYLOAD).statusCode()).isEqualTo(200);
+        UUID user=UUID.randomUUID();String subject=UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO proofmesh.operator_users(id,oidc_subject,status) VALUES (?,?,'ACTIVE')",user,subject);
+        jdbc.update("INSERT INTO proofmesh.organization_memberships(organization_id,user_id,status) VALUES (?,?,'ACTIVE')",organizationId,user);
+        String path="/api/v1/evidence/actions/"+action.id();
+        var exported=client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+springPort+path))
+                .header("Authorization","Bearer "+humanToken(subject,List.of("SECURITY_OPERATOR"),"proofmesh-control-plane")).GET().build(),HttpResponse.BodyHandlers.ofString());
+        assertThat(exported.statusCode()).isEqualTo(200);
+        var evidence=json.readTree(exported.body());
+        assertThat(evidence.get("organizationId").asText()).isEqualTo(organizationId.toString());
+        assertThat(evidence.get("action").get("id").asText()).isEqualTo(action.id().toString());
+        assertThat(evidence.get("executions").get(0).get("execution_status").asText()).isEqualTo("RESULT_RECEIVED");
+        assertThat(exported.body()).doesNotContain(secret,submitted.get("executionGrant").asText(),PAYLOAD,"accepted");
+        Path archiveRoot=Files.createTempDirectory("proofmesh-local-archive-test-");
+        try {
+            var builder=new ProcessBuilder("python3","../../scripts/archive-local-evidence.py","--base-url","http://127.0.0.1:"+springPort,
+                    "--action",action.id().toString(),"--output",archiveRoot.toString()).redirectErrorStream(true);
+            builder.environment().put("PROOFMESH_HUMAN_TOKEN",humanToken(subject,List.of("SECURITY_OPERATOR"),"proofmesh-control-plane"));
+            var exporter=builder.start();assertThat(exporter.waitFor(15,TimeUnit.SECONDS)).isTrue();
+            String output=new String(exporter.getInputStream().readAllBytes(),StandardCharsets.UTF_8).strip();
+            assertThat(exporter.exitValue()).isZero();
+            var verify=new ProcessBuilder("python3","../../scripts/archive-local-evidence.py","--verify",output).redirectErrorStream(true).start();
+            assertThat(verify.waitFor(5,TimeUnit.SECONDS)).isTrue();assertThat(verify.exitValue()).isZero();
+            assertThat(Files.readString(Path.of(output).resolve("evidence.json"))).doesNotContain(secret,submitted.get("executionGrant").asText());
+        } finally {
+            try(var paths=Files.walk(archiveRoot)){for(var archivedPath:paths.sorted(Comparator.reverseOrder()).toList())Files.delete(archivedPath);}
+        }
+
+        var viewer=client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+springPort+path))
+                .header("Authorization","Bearer "+humanToken(subject,List.of("VIEWER"),"proofmesh-control-plane")).GET().build(),HttpResponse.BodyHandlers.ofString());
+        assertThat(viewer.statusCode()).isEqualTo(403);
+        UUID other=UUID.randomUUID(),otherUser=UUID.randomUUID();String otherSubject=UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO proofmesh.organizations(id,slug,name,status) VALUES (?,?,?,'ACTIVE')",other,other.toString(),"Other evidence tenant");
+        jdbc.update("INSERT INTO proofmesh.operator_users(id,oidc_subject,status) VALUES (?,?,'ACTIVE')",otherUser,otherSubject);
+        jdbc.update("INSERT INTO proofmesh.organization_memberships(organization_id,user_id,status) VALUES (?,?,'ACTIVE')",other,otherUser);
+        var isolated=client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+springPort+path))
+                .header("Authorization","Bearer "+humanToken(otherSubject,List.of("SECURITY_OPERATOR"),"proofmesh-control-plane")).GET().build(),HttpResponse.BodyHandlers.ofString());
+        assertThat(isolated.statusCode()).isEqualTo(404);
+    }
+
     private String humanToken(String subject,List<String> roles,String audience) throws Exception {
         var jwt=new com.nimbusds.jwt.SignedJWT(new com.nimbusds.jose.JWSHeader.Builder(com.nimbusds.jose.JWSAlgorithm.RS256).keyID(humanKey.getKeyID()).build(),
                 new com.nimbusds.jwt.JWTClaimsSet.Builder().issuer(humanIssuer).subject(subject).audience(audience)

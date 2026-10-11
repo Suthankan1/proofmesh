@@ -31,3 +31,9 @@ Thumbs.db
 /.tmp/
 AGENTS.md
 prompts/
+
+# Local evidence archive copies (never commit operational artifacts)
+/local-evidence/
+
+# Python verification caches
+/scripts/__pycache__/
