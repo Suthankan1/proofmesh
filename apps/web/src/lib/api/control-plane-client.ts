@@ -42,6 +42,7 @@ async function getFromControlPlane<T>(
       },
 
       cache: "no-store",
+      redirect: "error",
 
       signal: AbortSignal.timeout(
         REQUEST_TIMEOUT_MS,
