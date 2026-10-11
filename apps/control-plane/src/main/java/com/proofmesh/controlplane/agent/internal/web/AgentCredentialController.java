@@ -7,6 +7,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import org.springframework.http.CacheControl;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -17,12 +19,15 @@ import org.springframework.web.server.ResponseStatusException;
 @RequestMapping("/api/v1/agents")
 class AgentCredentialController {
     private final AgentCredentialService credentials;
+    private final JdbcTemplate jdbc;
 
-    AgentCredentialController(AgentCredentialService credentials) {
+    AgentCredentialController(AgentCredentialService credentials, JdbcTemplate jdbc) {
         this.credentials = credentials;
+        this.jdbc = jdbc;
     }
 
     @PostMapping("/{agentId}/credentials/rotate")
+    @Transactional
     @PreAuthorize("hasRole('PLATFORM_ADMIN')")
     ResponseEntity<CredentialResponse> rotate(
             @CurrentOrganization OrganizationContext organization,
@@ -35,11 +40,26 @@ class AgentCredentialController {
         try {
             var issued = credentials.rotate(organization.organizationId(), agentId,
                     Duration.ofSeconds(request.validitySeconds()));
+            audit(organization,agentId,"ROTATED");
             return ResponseEntity.status(HttpStatus.CREATED).cacheControl(CacheControl.noStore())
                     .body(new CredentialResponse(issued.id(), issued.secret(), issued.expiresAt()));
         } catch (IllegalArgumentException unavailable) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Active scoped agent unavailable");
         }
+    }
+
+    @PostMapping("/{agentId}/credentials/revoke")
+    @PreAuthorize("hasRole('PLATFORM_ADMIN')")
+    @Transactional
+    ResponseEntity<Void> revoke(@CurrentOrganization OrganizationContext organization, @PathVariable UUID agentId) {
+        if(!credentials.revoke(organization.organizationId(),agentId))
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Scoped agent unavailable");
+        audit(organization,agentId,"REVOKED");
+        return ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build();
+    }
+    private void audit(OrganizationContext organization, UUID agentId, String operation) {
+        jdbc.update("INSERT INTO proofmesh.agent_credential_admin_audit(id,organization_id,agent_id,actor_id,operation) VALUES (?,?,?,?,?)",
+                UUID.randomUUID(),organization.organizationId(),agentId,organization.oidcSubject(),operation);
     }
 
     record RotationRequest(Long validitySeconds) { }

@@ -35,12 +35,16 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** Opt-in cross-language proof; does not bypass or implement agent authentication. */
+/** Opt-in local cross-language proof, including cryptographically verified human JWTs and opaque agents. */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
 @EnabledIfSystemProperty(named = "proofmesh.crossservice", matches = "true")
 class CrossServiceGovernanceIntegrationTest {
     private static Path keyDirectory;
+    private static HttpServer oidc;
+    private static com.nimbusds.jose.jwk.RSAKey humanKey;
+    private static String humanIssuer;
+    private final tools.jackson.databind.json.JsonMapper json = tools.jackson.databind.json.JsonMapper.builder().build();
     private static final String PAYLOAD = "{\"amount\":5000,\"paymentId\":\"local-test\"}";
     private final UUID organizationId = UUID.randomUUID();
     private final UUID agentId = UUID.randomUUID();
@@ -52,6 +56,7 @@ class CrossServiceGovernanceIntegrationTest {
     private URI executionUri;
 
     @Autowired JdbcTemplate jdbc;
+    @Autowired com.proofmesh.controlplane.agent.AgentCredentialService credentials;
     @Autowired GovernedActionRepository actions;
     @Autowired RequestPayloadCanonicalizer canonicalizer;
     @Autowired PolicyVersionRepository versions;
@@ -72,6 +77,17 @@ class CrossServiceGovernanceIntegrationTest {
         var publicPath = keyDirectory.resolve("public.pem");
         Files.writeString(privatePath, pem("PRIVATE KEY", keys.getPrivate().getEncoded()));
         Files.writeString(publicPath, pem("PUBLIC KEY", keys.getPublic().getEncoded()));
+        humanKey=new com.nimbusds.jose.jwk.gen.RSAKeyGenerator(2048).keyID("local-human-test").generate();
+        oidc=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
+        oidc.createContext("/jwks",exchange->{
+            byte[] body=new com.nimbusds.jose.jwk.JWKSet(humanKey.toPublicJWK()).toString().getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type","application/json");
+            exchange.sendResponseHeaders(200,body.length);
+            try(var out=exchange.getResponseBody()){out.write(body);}exchange.close();
+        });
+        oidc.start(); humanIssuer="http://127.0.0.1:"+oidc.getAddress().getPort();
+        registry.add("spring.security.oauth2.resourceserver.jwt.issuer-uri",()->humanIssuer);
+        registry.add("spring.security.oauth2.resourceserver.jwt.jwk-set-uri",()->humanIssuer+"/jwks");
         registry.add("proofmesh.execution-grant.signing.enabled", () -> "true");
         registry.add("proofmesh.execution-grant.signing.key-id", () -> "crossservice-test");
         registry.add("proofmesh.execution-grant.signing.private-key-path", privatePath::toString);
@@ -148,6 +164,7 @@ class CrossServiceGovernanceIntegrationTest {
 
     @AfterAll
     static void removeKeys() throws Exception {
+        if(oidc!=null) oidc.stop(0);
         if (keyDirectory != null) {
             Files.deleteIfExists(keyDirectory.resolve("private.pem"));
             Files.deleteIfExists(keyDirectory.resolve("public.pem"));
@@ -253,6 +270,127 @@ class CrossServiceGovernanceIntegrationTest {
                 String.class, action.id())).isNull();
         assertThat(execute(action, governed, token, PAYLOAD).statusCode()).isEqualTo(409);
         assertThat(toolCalls).hasValue(1);
+    }
+
+    @Test
+    void authenticatedAgentAndHumanApprovalFlowExecutesExactActionOnce() throws Exception {
+        var action=actionWithPolicy(PolicyEffect.REQUIRE_APPROVAL);
+        String subject=UUID.randomUUID().toString();UUID user=UUID.randomUUID();
+        jdbc.update("INSERT INTO proofmesh.operator_users(id,oidc_subject,status) VALUES (?,?,'ACTIVE')",user,subject);
+        jdbc.update("INSERT INTO proofmesh.organization_memberships(organization_id,user_id,status) VALUES (?,?,'ACTIVE')",organizationId,user);
+        String human=humanToken(subject,List.of("PLATFORM_ADMIN","APPROVER"),"proofmesh-control-plane");
+        var rotation=humanRequest("/api/v1/agents/"+agentId+"/credentials/rotate",human,"{\"validitySeconds\":3600}");
+        assertThat(rotation.statusCode()).isEqualTo(201);
+        String secret=json.readTree(rotation.body()).get("secret").asText();
+        var pending=submitHttp(action,secret,PAYLOAD);
+        assertThat(pending.statusCode()).isEqualTo(200);
+        var pendingBody=json.readTree(pending.body());
+        assertThat(pendingBody.get("outcome").asText()).isEqualTo("REQUIRE_APPROVAL");
+        assertThat(pendingBody.get("executionGrant").isNull()).isTrue();
+        String path="/api/v1/approvals/"+pendingBody.get("approvalRequestId").asText()+"/approve";
+        assertThat(humanRequest(path,secret,"{\"rationale\":\"Agent spoof\"}").statusCode()).isEqualTo(401);
+        assertThat(humanRequest(path,humanToken(subject,List.of("VIEWER"),"proofmesh-control-plane"),"{\"rationale\":\"Viewer spoof\"}").statusCode()).isEqualTo(403);
+        assertThat(humanRequest(path,humanToken(subject,List.of("APPROVER"),"wrong-audience"),"{\"rationale\":\"Wrong audience\"}").statusCode()).isEqualTo(401);
+        assertThat(humanRequest(path,human,"{\"rationale\":\"Reviewed exact local action\"}").statusCode()).isEqualTo(200);
+        assertThat(toolCalls).hasValue(0);
+        var retry=json.readTree(submitHttp(action,secret,PAYLOAD).body());
+        assertThat(retry.get("governedActionId").asText()).isEqualTo(action.id().toString());
+        assertThat(retry.get("governanceDecisionId").asText()).isEqualTo(pendingBody.get("governanceDecisionId").asText());
+        assertThat(retry.get("outcome").asText()).isEqualTo("REQUIRE_APPROVAL");
+        assertThat(executeSubmitted(retry,"{\"amount\":5001,\"paymentId\":\"local-test\"}").statusCode()).isEqualTo(403);
+        assertThat(toolCalls).hasValue(0);
+        assertThat(executeSubmitted(retry,PAYLOAD).statusCode()).isEqualTo(200);
+        stopGateway();startGateway();
+        assertThat(executeSubmitted(retry,PAYLOAD).statusCode()).isEqualTo(409);
+        assertThat(toolCalls).hasValue(1);
+    }
+
+    @Test
+    void authenticatedAllowAndCredentialRotationPreserveSingleUseAuthority() throws Exception {
+        var action=actionWithPolicy(PolicyEffect.ALLOW);
+        var first=credentials.rotate(organizationId,agentId,Duration.ofHours(1));
+        var allowed=json.readTree(submitHttp(action,first.secret(),PAYLOAD).body());
+        assertThat(allowed.get("outcome").asText()).isEqualTo("ALLOW");
+        assertThat(executeSubmitted(allowed,PAYLOAD).statusCode()).isEqualTo(200);
+        var second=credentials.rotate(organizationId,agentId,Duration.ofHours(1));
+        assertThat(submitHttp(action,first.secret(),PAYLOAD).statusCode()).isEqualTo(401);
+        var retry=json.readTree(submitHttp(action,second.secret(),PAYLOAD).body());
+        assertThat(retry.get("executionGrant").isNull()).isTrue();
+        assertThat(retry.get("authorityStatus").asText()).isEqualTo("ALREADY_ISSUED");
+        assertThat(executeSubmitted(allowed,PAYLOAD).statusCode()).isEqualTo(409);
+        assertThat(toolCalls).hasValue(1);
+    }
+
+    @Test
+    void concurrentHttpSubmissionsMintOnlyOneToken() throws Exception {
+        var action=actionWithPolicy(PolicyEffect.ALLOW);
+        String secret=credentials.rotate(organizationId,agentId,Duration.ofHours(1)).secret();
+        var ready=new CountDownLatch(8);var start=new CountDownLatch(1);
+        try(var pool=Executors.newFixedThreadPool(8)) {
+            var futures=new ArrayList<Future<HttpResponse<String>>>();
+            for(int i=0;i<8;i++) futures.add(pool.submit(()->{
+                ready.countDown();assertThat(start.await(5,TimeUnit.SECONDS)).isTrue();
+                return submitHttp(action,secret,PAYLOAD);
+            }));
+            assertThat(ready.await(5,TimeUnit.SECONDS)).isTrue();start.countDown();
+            var tokens=new ArrayList<tools.jackson.databind.JsonNode>();
+            for(var future:futures) {
+                var response=future.get(15,TimeUnit.SECONDS);assertThat(response.statusCode()).isEqualTo(200);
+                var body=json.readTree(response.body());
+                if(!body.get("executionGrant").isNull()) tokens.add(body);
+                else assertThat(body.get("authorityStatus").asText()).isEqualTo("ALREADY_ISSUED");
+            }
+            assertThat(tokens).hasSize(1);
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM proofmesh.runtime_grant_issuances WHERE governed_action_id=?",Integer.class,action.id())).isEqualTo(1);
+            assertThat(executeSubmitted(tokens.getFirst(),PAYLOAD).statusCode()).isEqualTo(200);
+            assertThat(toolCalls).hasValue(1);
+        } finally {start.countDown();}
+    }
+    @Test
+    void issuancePersistenceFailureReturnsNoTokenAndDoesNotConsumeAction() throws Exception {
+        var action=actionWithPolicy(PolicyEffect.ALLOW);
+        String secret=credentials.rotate(organizationId,agentId,Duration.ofHours(1)).secret();
+        String name="test_reject_issuance_"+UUID.randomUUID().toString().replace("-","");
+        jdbc.execute("CREATE FUNCTION proofmesh."+name+"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.governed_action_id='"+action.id()+"'::uuid THEN RAISE EXCEPTION 'test issuance unavailable'; END IF; RETURN NEW; END $$");
+        jdbc.execute("CREATE TRIGGER "+name+" BEFORE INSERT ON proofmesh.runtime_grant_issuances FOR EACH ROW EXECUTE FUNCTION proofmesh."+name+"()");
+        try {
+            var failed=submitHttp(action,secret,PAYLOAD);
+            assertThat(failed.statusCode()).isEqualTo(503);
+            assertThat(json.readTree(failed.body()).has("executionGrant")).isFalse();
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM proofmesh.runtime_grant_issuances WHERE governed_action_id=?",Integer.class,action.id())).isZero();
+            assertThat(toolCalls).hasValue(0);
+        } finally {
+            jdbc.execute("DROP TRIGGER "+name+" ON proofmesh.runtime_grant_issuances");
+            jdbc.execute("DROP FUNCTION proofmesh."+name+"()");
+        }
+        var retry=json.readTree(submitHttp(action,secret,PAYLOAD).body());
+        assertThat(executeSubmitted(retry,PAYLOAD).statusCode()).isEqualTo(200);
+        assertThat(toolCalls).hasValue(1);
+    }
+
+    private String humanToken(String subject,List<String> roles,String audience) throws Exception {
+        var jwt=new com.nimbusds.jwt.SignedJWT(new com.nimbusds.jose.JWSHeader.Builder(com.nimbusds.jose.JWSAlgorithm.RS256).keyID(humanKey.getKeyID()).build(),
+                new com.nimbusds.jwt.JWTClaimsSet.Builder().issuer(humanIssuer).subject(subject).audience(audience)
+                .issueTime(Date.from(Instant.now())).expirationTime(Date.from(Instant.now().plusSeconds(120)))
+                .claim("realm_access",Map.of("roles",roles)).build());
+        jwt.sign(new com.nimbusds.jose.crypto.RSASSASigner(humanKey));return jwt.serialize();
+    }
+    private HttpResponse<String> humanRequest(String path,String token,String body) throws Exception {
+        return client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:"+springPort+path)).timeout(Duration.ofSeconds(10))
+                .header("Authorization","Bearer "+token).header("Content-Type","application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body)).build(),HttpResponse.BodyHandlers.ofString());
+    }
+    private HttpResponse<String> submitHttp(GovernedAction action,String secret,String payload) throws Exception {
+        return humanRequest("/api/v1/runtime/actions",secret,json.writeValueAsString(Map.of("idempotencyKey",action.idempotencyKey().value(),
+                "toolName",action.toolName().value(),"operationName",action.operationName().value(),"requestPayloadJson",payload)));
+    }
+    private HttpResponse<String> executeSubmitted(tools.jackson.databind.JsonNode result,String payload) throws Exception {
+        String body=json.writeValueAsString(Map.of("organization_id",result.get("organizationId").asText(),"agent_id",result.get("agentId").asText(),
+                "governed_action_id",result.get("governedActionId").asText(),"governance_decision_id",result.get("governanceDecisionId").asText(),
+                "tool_name","payments","operation_name","refund","payload",json.readTree(payload)));
+        return client.send(HttpRequest.newBuilder(executionUri).timeout(Duration.ofSeconds(10))
+                .header("Authorization","Bearer "+result.get("executionGrant").asText()).header("Content-Type","application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body)).build(),HttpResponse.BodyHandlers.ofString());
     }
 
     private GovernedAction actionWithPolicy(PolicyEffect effect) {

@@ -7,5 +7,6 @@ import java.util.UUID;
 /** Application port; administrative transport must authorize rotation separately. */
 public interface AgentCredentialService {
     IssuedAgentCredential rotate(UUID organizationId, UUID agentId, Duration validity);
+    boolean revoke(UUID organizationId, UUID agentId);
     Optional<AuthenticatedAgent> authenticate(String opaqueCredential);
 }

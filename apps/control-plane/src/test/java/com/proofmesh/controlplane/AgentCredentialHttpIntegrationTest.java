@@ -24,6 +24,7 @@ import org.springframework.transaction.annotation.Transactional;
 class AgentCredentialHttpIntegrationTest {
     @Autowired MockMvc mvc;
     @Autowired JdbcTemplate jdbc;
+    @Autowired com.proofmesh.controlplane.agent.AgentCredentialService credentials;
     private final UUID organization = UUID.randomUUID(), agent = UUID.randomUUID(), user = UUID.randomUUID();
     private final String subject = UUID.randomUUID().toString();
     @BeforeEach void fixtures() {
@@ -61,4 +62,32 @@ class AgentCredentialHttpIntegrationTest {
         jdbc.update("UPDATE proofmesh.organization_memberships SET status='DISABLED' WHERE organization_id=? AND user_id=?", organization, user);
         mvc.perform(rotate(agent, "{\"validitySeconds\":3600}", "PLATFORM_ADMIN")).andExpect(status().isForbidden());
     }
+    @Test void adminCanRevokeWithoutReplacementAndAuditUsesHumanIdentity() throws Exception {
+        var issued=credentials.rotate(organization,agent,java.time.Duration.ofHours(1));
+        mvc.perform(post("/api/v1/agents/"+agent+"/credentials/revoke")
+                .with(jwt().jwt(t->t.subject(subject)).authorities(new SimpleGrantedAuthority("ROLE_PLATFORM_ADMIN"))))
+                .andExpect(status().isNoContent());
+        assertThat(credentials.authenticate(issued.secret())).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT actor_id FROM proofmesh.agent_credential_admin_audit WHERE agent_id=?",String.class,agent)).isEqualTo(subject);
+        assertThat(jdbc.queryForObject("SELECT operation FROM proofmesh.agent_credential_admin_audit WHERE agent_id=?",String.class,agent)).isEqualTo("REVOKED");
+    }
+
+    @Test
+    @Transactional(propagation=org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
+    void failedAdminAuditRollsBackCredentialRotation() throws Exception {
+        var original=credentials.rotate(organization,agent,java.time.Duration.ofHours(1));
+        String name="test_admin_audit_"+UUID.randomUUID().toString().replace("-","");
+        jdbc.execute("CREATE FUNCTION proofmesh."+name+"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.agent_id='"+agent+"'::uuid THEN RAISE EXCEPTION 'test admin audit unavailable'; END IF; RETURN NEW; END $$");
+        jdbc.execute("CREATE TRIGGER "+name+" BEFORE INSERT ON proofmesh.agent_credential_admin_audit FOR EACH ROW EXECUTE FUNCTION proofmesh."+name+"()");
+        try {
+            org.assertj.core.api.Assertions.assertThatThrownBy(()->mvc.perform(rotate(agent,"{\"validitySeconds\":3600}","PLATFORM_ADMIN")))
+                    .isInstanceOf(jakarta.servlet.ServletException.class);
+            assertThat(credentials.authenticate(original.secret())).isPresent();
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM proofmesh.agent_credentials WHERE agent_id=?",Integer.class,agent)).isEqualTo(1);
+        } finally {
+            jdbc.execute("DROP TRIGGER "+name+" ON proofmesh.agent_credential_admin_audit");
+            jdbc.execute("DROP FUNCTION proofmesh."+name+"()");
+        }
+    }
+
 }

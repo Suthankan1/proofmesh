@@ -17,20 +17,19 @@ import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.annotation.Transactional;
 
 @SpringBootTest
 @AutoConfigureMockMvc
 @Import(TestcontainersConfiguration.class)
+@Transactional
 class OrganizationContextIntegrationTest {
 
-    private static final UUID ORGANIZATION_ID =
-            UUID.fromString("10000000-0000-0000-0000-000000000001");
+    private final UUID ORGANIZATION_ID = UUID.randomUUID();
 
-    private static final UUID USER_ID =
-            UUID.fromString("20000000-0000-0000-0000-000000000001");
+    private final UUID USER_ID = UUID.randomUUID();
 
-    private static final String SUBJECT =
-            "keycloak-user-123";
+    private final String SUBJECT = UUID.randomUUID().toString();
 
     @Autowired
     MockMvc mockMvc;
@@ -40,18 +39,6 @@ class OrganizationContextIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.organization_memberships"
-        );
-
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.operator_users"
-        );
-
-        jdbcTemplate.update(
-                "DELETE FROM proofmesh.organizations"
-        );
-
         jdbcTemplate.update(
                 """
                 INSERT INTO proofmesh.organizations (
@@ -63,7 +50,7 @@ class OrganizationContextIntegrationTest {
                 VALUES (?, ?, ?, ?)
                 """,
                 ORGANIZATION_ID,
-                "proofmesh-demo",
+                ORGANIZATION_ID.toString(),
                 "ProofMesh Demo",
                 "ACTIVE"
         );
@@ -125,7 +112,7 @@ class OrganizationContextIntegrationTest {
                 )
                 .andExpect(
                         jsonPath("$.organizationSlug")
-                                .value("proofmesh-demo")
+                                .value(ORGANIZATION_ID.toString())
                 )
                 .andExpect(
                         jsonPath("$.oidcSubject")
@@ -136,7 +123,7 @@ class OrganizationContextIntegrationTest {
     @Test
     void rejectsAuthenticatedUserWithoutMembership() throws Exception {
         jdbcTemplate.update(
-                "DELETE FROM proofmesh.organization_memberships"
+                "DELETE FROM proofmesh.organization_memberships WHERE organization_id=? AND user_id=?", ORGANIZATION_ID, USER_ID
         );
 
         mockMvc.perform(

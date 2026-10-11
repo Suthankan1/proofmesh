@@ -71,6 +71,18 @@ class JdbcAgentCredentialService implements AgentCredentialService {
     }
 
     @Override
+    @Transactional
+    public boolean revoke(UUID organizationId, UUID agentId) {
+        Objects.requireNonNull(organizationId);Objects.requireNonNull(agentId);
+        var scoped=jdbc.query("SELECT id FROM proofmesh.agents WHERE id=? AND organization_id=? FOR UPDATE",
+                (rs,row)->rs.getObject(1),agentId,organizationId);
+        if(scoped.size()!=1) return false;
+        jdbc.update("UPDATE proofmesh.agent_credentials SET revoked_at=? WHERE organization_id=? AND agent_id=? AND revoked_at IS NULL",
+                timestamp(clock.instant()),organizationId,agentId);
+        return true;
+    }
+
+    @Override
     @Transactional(readOnly = true)
     public Optional<AuthenticatedAgent> authenticate(String opaqueCredential) {
         if (opaqueCredential == null || !FORMAT.matcher(opaqueCredential).matches()) return Optional.empty();
