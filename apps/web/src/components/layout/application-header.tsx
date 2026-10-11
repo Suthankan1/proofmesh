@@ -11,7 +11,7 @@ export function ApplicationHeader({
 }: ApplicationHeaderProps) {
   return (
     <header className="border-b border-border bg-surface">
-      <div className="flex min-h-16 items-center justify-between gap-6 px-6 lg:px-8">
+      <div className="flex min-h-16 flex-wrap items-center justify-between gap-3 px-6 py-3 lg:px-8">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold text-foreground">
             {organizationName}
@@ -22,8 +22,8 @@ export function ApplicationHeader({
           </p>
         </div>
 
-        <div className="flex shrink-0 items-center gap-3">
-          <span className="rounded-md bg-surface-subtle px-2.5 py-1 text-xs font-semibold text-foreground-secondary">
+        <div className="flex min-w-0 flex-wrap items-center gap-3">
+          <span className="max-w-full break-words rounded-md bg-surface-subtle px-2.5 py-1 text-xs font-semibold text-foreground-secondary">
             {roleLabel}
           </span>
 

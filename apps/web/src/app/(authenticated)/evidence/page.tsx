@@ -26,7 +26,7 @@ export default async function EvidencePage({ searchParams }: { searchParams: Pro
   }
   if (failure) return <ControlPlaneFailure kind={failure} />;
   return <><PageHeader eyebrow="Assurance" title="Evidence" description="Inspect exact-action provenance and observed gateway outcomes. An unknown outcome never proves failure or authorizes a retry." />
-    <SurfaceCard className="mt-8 p-6"><form method="get" className="flex flex-wrap gap-3"><label htmlFor="action">Action ID</label><input id="action" name="action" required defaultValue={action} className="min-w-80 rounded border border-border p-2" /><button className="rounded bg-brand px-4 py-2 text-white">Inspect evidence</button></form>
+    <SurfaceCard className="mt-8 p-6"><form method="get" className="flex flex-wrap gap-3"><label htmlFor="action">Action ID</label><input id="action" name="action" required defaultValue={action} className="min-w-0 flex-1 rounded border border-border p-2" /><button className="rounded bg-brand px-4 py-2 text-white">Inspect evidence</button></form>
       {action && !evidence && <p role="alert" className="mt-4">Enter a valid action UUID.</p>}
       {evidence && <><p className="mt-4">Read-only snapshot. Archive copies can be saved with the local evidence archive command.</p><pre className="mt-4 overflow-x-auto rounded bg-surface-subtle p-4 text-xs">{JSON.stringify(evidence, null, 2)}</pre></>}
     </SurfaceCard></>;
