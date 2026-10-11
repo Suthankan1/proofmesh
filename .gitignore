@@ -37,3 +37,10 @@ prompts/
 
 # Python verification caches
 /scripts/__pycache__/
+
+# Private isolated local demo state (keys, accounts, logs, retained evidence)
+.local-demo/
+
+# Next.js generated local agent instructions
+apps/web/CLAUDE.md
+scripts/dev/__pycache__/
