@@ -829,3 +829,26 @@ func assertNotReady(t *testing.T, err error) {
 		t.Fatalf("expected sanitized readiness sentinel, got %v", err)
 	}
 }
+
+func TestRuntimeRejectsShadowClaimSchema(t *testing.T) {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, testConnStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	schema := "shadow_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := pool.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	// Explicitly choosing a different namespace must not silently change replay authority.
+	cfg := Config{DatabaseURL: testConnStr + "&search_path=" + schema, Issuer: "issuer", Audience: "audience", JWKSURL: "http://localhost:8080/jwks", ToolTargets: []httpexecutor.Target{{ToolName: "payments", OperationName: "refund", URL: "http://localhost:9000/refund"}}}
+	rt, err := New(ctx, cfg)
+	if rt != nil {
+		rt.Close()
+		t.Fatal("gateway accepted a shadow authority namespace")
+	}
+	if !errors.Is(err, ErrDatabaseUnavailable) {
+		t.Fatalf("expected sanitized database failure, got %v", err)
+	}
+}

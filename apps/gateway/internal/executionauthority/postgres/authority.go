@@ -26,7 +26,7 @@ var (
 var _ pep.ExecutionAuthority = (*Authority)(nil)
 
 const insertClaimSQL = `
-INSERT INTO execution_grant_claims (
+INSERT INTO public.execution_grant_claims (
     grant_id,
     organization_id,
     agent_id,

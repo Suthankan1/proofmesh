@@ -614,3 +614,26 @@ func TestEvidenceUpgradePreservesLegacyReplayAuthority(t *testing.T) {
 		t.Fatal("legacy history rewritten")
 	}
 }
+
+func TestMigrationRejectsShadowNamespaceWithoutCreatingTables(t *testing.T) {
+	db, err := sql.Open("pgx", testConnStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	schema := "shadow_namespace_test"
+	if _, err := db.Exec("CREATE SCHEMA IF NOT EXISTS " + schema); err != nil {
+		t.Fatal(err)
+	}
+	err = dbmigrate.Run(context.Background(), testConnStr+"&search_path="+schema)
+	if !errors.Is(err, dbmigrate.ErrMigrationFailed) {
+		t.Fatalf("expected sanitized failure, got %v", err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT count(*) FROM information_schema.tables WHERE table_schema=$1", schema).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("migration created a second authority namespace")
+	}
+}

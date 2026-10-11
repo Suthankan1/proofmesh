@@ -27,7 +27,7 @@ func (s *PostgresStore) Start(ctx context.Context, c pep.BoundToolCall) error {
 	if s == nil || s.pool == nil {
 		return ErrEvidenceUnavailable
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE execution_grant_claims SET execution_status='STARTED',started_at=clock_timestamp()
+	tag, err := s.pool.Exec(ctx, `UPDATE public.execution_grant_claims SET execution_status='STARTED',started_at=clock_timestamp()
  WHERE `+binding+` AND execution_status='ADMITTED' AND expires_at>clock_timestamp()`, bindingArgs(c)...)
 	if err != nil || tag.RowsAffected() != 1 {
 		return ErrEvidenceUnavailable
@@ -39,7 +39,7 @@ func (s *PostgresStore) Finish(ctx context.Context, c pep.BoundToolCall, o Outco
 		return ErrEvidenceUnavailable
 	}
 	args := append(bindingArgs(c), o.Status, o.ResponseHash, o.ResponseBytes)
-	tag, err := s.pool.Exec(ctx, `UPDATE execution_grant_claims SET execution_status=$9,finished_at=clock_timestamp(),
+	tag, err := s.pool.Exec(ctx, `UPDATE public.execution_grant_claims SET execution_status=$9,finished_at=clock_timestamp(),
  response_hash=NULLIF($10,''),response_bytes=CASE WHEN $9='RESULT_RECEIVED' THEN $11::bigint ELSE NULL END
  WHERE `+binding+` AND execution_status='STARTED'`, args...)
 	if err != nil || tag.RowsAffected() != 1 {

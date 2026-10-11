@@ -129,6 +129,16 @@ func newRuntime(ctx context.Context, cfg Config, deps runtimeDeps) (*Runtime, er
 		return nil, ErrDatabaseUnavailable
 	}
 
+	// A user-named schema must never shadow the shared public replay/evidence authority.
+	var publicNamespace bool
+	if err := pool.QueryRow(ctx, "SELECT current_schema() = 'public'").Scan(&publicNamespace); err != nil || !publicNamespace {
+		pool.Close()
+		if ownedTransport != nil {
+			ownedTransport.CloseIdleConnections()
+		}
+		return nil, ErrDatabaseUnavailable
+	}
+
 	// 3. Construct durable PostgreSQL ExecutionAuthority
 	authority, err := authorityFactory(pool)
 	if err != nil {

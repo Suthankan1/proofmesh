@@ -105,6 +105,12 @@ func (m *Migrator) Up(ctx context.Context) error {
 	}
 	defer conn.Close()
 
+	// Fail before goose creates any version table in a shadow namespace.
+	var publicNamespace bool
+	if err := conn.QueryRowContext(ctx, "SELECT current_schema() = 'public'").Scan(&publicNamespace); err != nil || !publicNamespace {
+		return ErrMigrationFailed
+	}
+
 	locker, err := newMigrationLocker()
 	if err != nil {
 		return ErrMigrationFailed
