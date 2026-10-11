@@ -1,8 +1,8 @@
 # ProofMesh
 
-ProofMesh is an in-progress, security-focused runtime governance and execution control plane for autonomous AI agents. It decouples governance decisions from tool execution: a Spring Boot control plane acts as the Policy Decision Point (PDP) to evaluate policy, manage human approvals, and issue short-lived execution grants, while a high-performance Go gateway acts as the sole Policy Enforcement Point (PEP) to verify grants offline, enforce exact request binding, guarantee single-use replay protection, and invoke protected tools.
+ProofMesh is a locally runnable, security-focused runtime governance and execution control plane for autonomous AI agents. It decouples governance decisions from tool execution: a Spring Boot control plane acts as the Policy Decision Point (PDP) to evaluate policy, manage human approvals, and issue short-lived execution grants, while a high-performance Go gateway acts as the sole Policy Enforcement Point (PEP) to verify grants offline, enforce exact request binding, guarantee single-use replay protection, and invoke protected tools.
 
-> **Status:** Active local-only development. Spring governance/approval/grant services, the Go execution gateway, durable replay protection, execution-outcome evidence, probes, tracing, Prometheus metrics and hardened local container artifacts are implemented. Real Spring-issued grants are verified through the gateway and PostgreSQL in opt-in cross-service tests. Tenant-bound hash-only agent credentials, authenticated and rate-limited runtime submission, human approval HTTP adapters, at-most-once grant issuance, and private local evidence archives are implemented. The operator approval screen is connected to these APIs. Actual Keycloak browser verification, the reproducible local demo, remaining operator screens, and final security/threat-model review remain unfinished. Cloud deployment is outside the current project scope.
+> **Status:** The agreed local governance MVP is implemented and verified: authenticated agent submission, human approvals, at-most-once issuance, durable gateway replay/outcome evidence, private evidence archives, tenant-scoped operator screens, real Keycloak browser authentication and an isolated reproducible demo. See [local completion](docs/engineering/local-completion.md) and the [finishing security audit](docs/security/local-security-audit.md) for exact evidence and limitations. The a8dc055 GitGuardian occurrence is a confirmed false positive; the earlier f4d7145 incident still needs its exact detector location, and dashboard closure is unverified. Patched web runtime dependencies have zero known npm production advisories; one upstream development-only advisory remains documented. Scope is local only: no cloud/production deployment, infrastructure provisioning, registry publishing or production CI/CD.
 
 ---
 
@@ -130,7 +130,11 @@ ProofMesh enforces the following non-negotiable security invariants:
 * [x] Time-bounded approval authorization checks (`isApprovedAndValidAt`)
 * [x] Execution grant claims domain model (`ExecutionGrantClaims`)
 * [x] Keycloak / OIDC resource server integration
-* [x] 12 Flyway schema migrations (`V1` through `V12`)
+* [x] 16 forward Flyway schema migrations (`V1` through `V16`)
+* [x] Tenant-bound hash-only agent credentials with authorized rotation/revocation
+* [x] Authenticated, durably rate-limited agent runtime submission and human-only approval APIs
+* [x] Immutable at-most-once execution grant issuance and administrator audit
+* [x] Tenant-scoped console snapshots and private copy-only evidence archives
 
 ### Implemented (Gateway)
 * [x] RFC 8785 / JCS canonical payload hashing (`deszhou/jcs`)
@@ -146,7 +150,7 @@ ProofMesh enforces the following non-negotiable security invariants:
 * [x] Operational health and readiness probes (`GET /healthz` process liveness and PostgreSQL-backed `GET /readyz`)
 * [x] Dedicated one-shot database migration runner (`cmd/migrate`) with versioned schema and PostgreSQL advisory locking
 
-### Roadmap / In Progress
+### Implemented Operations and Local Console
 * [x] Gateway standalone server bootstrap (`main.go` and network listener lifecycle)
 * [x] Graceful shutdown and OS signal handling in gateway runtime
 * [x] Dedicated one-shot gateway database migration runner
@@ -154,8 +158,14 @@ ProofMesh enforces the following non-negotiable security invariants:
 * [x] OpenTelemetry execution tracing foundation (OTLP/HTTP, TraceContext, POST `/v1/executions`)
 * [x] Gateway Prometheus execution HTTP metrics (`GET /metrics`, bounded status classes, latency, in-flight requests)
 * [x] Separate digest-pinned non-root gateway/migration OCI images and CI artifact checks
-* [ ] Execution audit log archival and automated retention policies
-* [ ] Dynamic service discovery for downstream tool endpoints (future scope; current releases retain trusted static routing)
+* [x] Durable invocation intent and bounded observed execution outcome evidence
+* [x] Private local archive copies with tenant/action binding and corruption checks; source history and replay authority retained
+* [x] Dashboard, governed actions, approvals, agents, policies, observed tools, organization and restricted evidence screens
+* [x] Real Keycloak authorization-code/PKCE operator and viewer browser verification
+* [x] Isolated production-mode local demo with restart persistence and controlled mock tool
+* [x] Narrow-screen navigation and keyboard-accessible review tables
+
+Dynamic discovery, incident management, destructive retention and unrestricted provisioning UI are outside the agreed MVP. Historical Kubernetes/release helpers remain reference scaffolding and are not part of local completion or a production deployment claim.
 
 ---
 
@@ -192,7 +202,7 @@ proofmesh/
 │   │   │   ├── policy/            # Policy engine & bindings
 │   │   │   ├── risk/              # Risk assessment & signal extraction
 │   │   │   └── runtimegovernance/ # Runtime governance orchestrator
-│   │   └── src/main/resources/db/migration/ # Flyway migrations (V1–V12)
+│   │   └── src/main/resources/db/migration/ # Flyway migrations (V1–V16)
 │   ├── gateway/                   # Go PEP & tool execution gateway
 │   │   ├── internal/
 │   │   │   ├── appconfig/         # Typed environment variable configuration loader
@@ -262,7 +272,7 @@ The gateway's typed configuration loader (`appconfig.Load`) reads and validates 
 
 | Environment Variable | Required | Description | Example (Development Only) |
 | :--- | :--- | :--- | :--- |
-| `PROOFMESH_DATABASE_URL` | Yes | PostgreSQL connection string for execution authority and replay tracking. | `postgres://proofmesh:proofmesh_dev_only@localhost:5432/proofmesh?sslmode=disable` |
+| `PROOFMESH_DATABASE_URL` | Yes | PostgreSQL connection string for execution authority and replay tracking. | `postgres://proofmesh:proofmesh_dev_only@localhost:5432/proofmesh?sslmode=disable&search_path=public` |
 | `PROOFMESH_EXECUTION_GRANT_ISSUER` | Yes | Expected issuer claim (`iss`) in signed execution grants. | `https://controlplane.proofmesh.local` |
 | `PROOFMESH_EXECUTION_GRANT_AUDIENCE` | Yes | Expected audience claim (`aud`) in signed execution grants. | `proofmesh-gateway` |
 | `PROOFMESH_JWKS_URL` | Yes | HTTP endpoint serving public keys for offline ES256 verification. | `http://localhost:8080/.well-known/jwks.json` |
@@ -291,6 +301,23 @@ The gateway's typed configuration loader (`appconfig.Load`) reads and validates 
 ---
 
 ## Running Locally
+
+### Recommended: complete isolated demonstration
+
+Use Docker Desktop, Java 25 with JAVA_HOME configured, Go 1.26+, Node 24, Python 3, OpenSSL and pnpm 11.21.0. First-time dependencies and images require registry access.
+
+```sh
+pnpm install --frozen-lockfile
+python3 scripts/dev/local-demo.py up
+```
+
+Keep the launcher running and open [the local operator console](http://localhost:13000). In another terminal, display the generated local account credentials privately with `python3 scripts/dev/local-demo.py credentials`. Sign in through Keycloak, submit with `python3 scripts/dev/local-demo.py submit`, approve the exact mock action in the browser, then run `python3 scripts/dev/local-demo.py execute ACTION_UUID`. The client checks one invocation, replay409 and ALREADY_ISSUED. No real payment or external tool is invoked.
+
+The demo uses its own Compose project/volumes and loopback ports; Ctrl-C stops its services while retaining keys, users, history and spent claims. See the [complete demo guide](docs/operations/local-demo.md) for ports, viewer restrictions, diagnostics and preserved-state restart.
+
+### Manual component development
+
+The following commands are separate development entry points, not the complete seeded demonstration.
 
 ### Prerequisites
 * Docker and Docker Compose
@@ -355,7 +382,7 @@ The shared builder, minimal distroless runtimes, and Dockerfile frontend use
 immutable image digests. Final images contain only their intended application
 binary and CA trust, run as non-root, and require runtime configuration. Digest
 refreshes must be reviewed to receive security updates. Local image execution
-has been verified on ARM64; CI builds and checks its runner platform.
+has been verified on ARM64; the existing CI configuration defines builds/checks for its runner platform, without a fresh remote CI result claimed here.
 
 The [gateway deployment guide](docs/operations/gateway-deployment.md) describes
 rendering and executing the explicit pre-deploy Job gate with separate migration
@@ -368,8 +395,7 @@ The [gateway metrics guide](docs/operations/gateway-metrics.md) documents exact
 `GET /metrics`, private-registry HTTP measurements, per-replica scraping and
 required monitoring access restrictions. Metrics contain no tokens, payloads,
 identity labels, or tool names and do not replace durable execution audit
-records. Audit archival/retention is still open: immutable governance history and
-durable replay authority must be preserved.
+records. [Private local archives](docs/operations/local-evidence-archives.md) are copy-only: immutable governance history and durable replay authority remain retained. Automated destructive retention is excluded.
 
 ---
 
@@ -425,8 +451,17 @@ This opt-in suite uses disposable PostgreSQL, temporary P-256 signing keys, the 
 
 Agent credentials contain 256 random bits, with only their SHA-256 stored. Tenant-scoped rotation, expiry, revocation and disabled/suspended identity checks are tested, including concurrent rotation. Human administrators can rotate or revoke credentials through tenant-scoped HTTP endpoints. Runtime credentials authorize submission only; approvals require human OIDC authority. See [credential boundary](docs/security/agent-credentials.md), [runtime and approval APIs](docs/engineering/runtime-api.md), and [private local evidence archives](docs/operations/local-evidence-archives.md).
 
-Current verification: 595 ordinary Java tests passed in randomized class order; six opt-in cross-service tests passed separately. Go dependency verification, static analysis and the complete race suite passed; the version-1-to-2 gateway migration preserves historical replay claims without inventing old execution outcomes. These results do not establish a completed operator UI or full agent submission flow.
+Latest local verification on 2026-10-11: Java 629 discovered / 618 executed / 11 opt-in skipped, zero failures/errors; 11 authenticated cross-service tests passed separately; Go module verification/vet/full uncached race suite passed; six web tests/typecheck/lint/production build passed; five archive and three demo safety tests passed. Web checks and frozen-lockfile installation passed again after the security dependency update. These are local results, not a claim about remote CI. Full commands, browser evidence and limits are recorded in [local completion](docs/engineering/local-completion.md).
+
+```sh
+pnpm --filter web test
+pnpm --filter web exec tsc --noEmit --incremental false
+pnpm --filter web lint
+pnpm --filter web build
+python3 -m unittest discover -s scripts -p 'test_archive_local_evidence.py'
+python3 -m unittest discover -s scripts/dev -p 'test_local_demo.py'
+```
 
 ## Project Status
 
-ProofMesh is under active, test-driven development. The platform is built incrementally around non-negotiable security boundaries: strict separation between decision and enforcement, fail-closed defaults, exact cryptographic binding, and durable replay protection.
+The local governance MVP is complete. Security incident administration still needs the exact f4d7145 detector location and dashboard verification; an unpatched development-tool advisory remains tracked. No vulnerability-free or production-security claim is made. Agent/policy provisioning is local setup; credential lifecycle is API-backed. Unknown tool outcomes and lost/expired issued authority remain fail closed; there is no cross-system business exactly-once guarantee. Publication/pushing requires separate authorization.

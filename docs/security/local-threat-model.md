@@ -39,3 +39,7 @@ An expired or lost issued token cannot be reminted for the same action. A lost/f
 Viewer reads are read-only. Credential lifecycle is available through tenant-scoped administrator APIs; policy/agent provisioning is local setup, not a new unrestricted console mutation workflow. Governed operations are observed records, not live discovery or arbitrary route registration. Console lists intentionally cap at 100; dashboard counts explicitly describe that scope. Approval authorization remains authoritative even if the screen has not refreshed. Archives retain authoritative DB rows and replay authority; manifest SHA-256 detects corruption, not malicious replacement authenticity. Local HTTP is permitted only in the loopback development topology; it is not a production TLS claim.
 
 The final verification record and reproducible commands are in [local completion](../engineering/local-completion.md) and [local demo](../operations/local-demo.md). Future key/dependency maintenance is ongoing operational work, not proof of vulnerability-free software.
+
+## Finishing audit supplement
+
+The [local security audit](local-security-audit.md) records the GitGuardian incident investigation, redacted full-history scan, runtime dependency patch and remaining development-tool advisory. The precise f4d7145 detector match and dashboard closure remain unverified; they must not be inferred from a clean runtime advisory count or passing tests.
