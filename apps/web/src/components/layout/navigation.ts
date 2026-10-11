@@ -30,10 +30,6 @@ export const navigationGroups = [
         label: "Approvals",
         href: "/approvals",
       },
-      {
-        label: "Incidents",
-        href: "/incidents",
-      },
     ],
   },
 
@@ -45,7 +41,7 @@ export const navigationGroups = [
         href: "/agents",
       },
       {
-        label: "Tools",
+        label: "Governed operations",
         href: "/tools",
       },
       {

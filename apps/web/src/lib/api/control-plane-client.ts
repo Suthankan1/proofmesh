@@ -4,6 +4,8 @@ import type { ZodType } from "zod";
 
 import {
   identityResponseSchema,
+  consoleResponseSchema,
+  evidenceResponseSchema,
   approvalResponseSchema,
   approvalListSchema,
   organizationContextSchema,
@@ -175,4 +177,11 @@ export function getApproval(id: string, token: string) {
 }
 export function resolveApproval(id: string, operation: "approve" | "reject", rationale: string, token: string) {
   return getFromControlPlane(`/api/v1/approvals/${encodeURIComponent(id)}/${operation}`, token, approvalResponseSchema, { rationale });
+}
+
+export function getConsole(token: string) {
+  return getFromControlPlane("/api/v1/console", token, consoleResponseSchema);
+}
+export function getEvidence(id: string, token: string) {
+  return getFromControlPlane(`/api/v1/evidence/actions/${encodeURIComponent(id)}`, token, evidenceResponseSchema);
 }
