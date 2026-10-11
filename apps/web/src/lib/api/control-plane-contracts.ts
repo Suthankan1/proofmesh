@@ -22,3 +22,12 @@ export const organizationContextSchema = z.object({
 
 export type OrganizationContext =
   z.infer<typeof organizationContextSchema>;
+export const approvalResponseSchema = z.object({
+  id: javaUuidSchema, organizationId: javaUuidSchema, agentId: javaUuidSchema,
+  governedActionId: javaUuidSchema, governanceDecisionId: javaUuidSchema,
+  toolName: z.string(), operationName: z.string(), payloadHash: z.string().regex(/^[0-9a-f]{64}$/),
+  status: z.enum(["PENDING", "APPROVED", "REJECTED", "EXPIRED"]),
+  requestedAt: z.string(), expiresAt: z.string(), validAuthorization: z.boolean(),
+  requestPayloadJson: z.string().nullable(),
+});
+export const approvalListSchema = z.array(approvalResponseSchema);

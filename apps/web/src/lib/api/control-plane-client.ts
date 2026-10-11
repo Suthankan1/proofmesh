@@ -4,6 +4,8 @@ import type { ZodType } from "zod";
 
 import {
   identityResponseSchema,
+  approvalResponseSchema,
+  approvalListSchema,
   organizationContextSchema,
   type IdentityResponse,
   type OrganizationContext,
@@ -19,6 +21,7 @@ async function getFromControlPlane<T>(
   path: string,
   accessToken: string,
   schema: ZodType<T>,
+  mutation?: { rationale: string },
 ): Promise<T> {
   const url = new URL(
     path,
@@ -29,10 +32,12 @@ async function getFromControlPlane<T>(
 
   try {
     response = await fetch(url, {
-      method: "GET",
+      method: mutation ? "POST" : "GET",
+      body: mutation ? JSON.stringify(mutation) : undefined,
 
       headers: {
         Accept: "application/json",
+        ...(mutation ? { "Content-Type": "application/json" } : {}),
         Authorization: `Bearer ${accessToken}`,
       },
 
@@ -160,4 +165,13 @@ export function getOrganizationContext(
     accessToken,
     organizationContextSchema,
   );
+}
+export function getApprovals(token: string) {
+  return getFromControlPlane("/api/v1/approvals?limit=100", token, approvalListSchema);
+}
+export function getApproval(id: string, token: string) {
+  return getFromControlPlane(`/api/v1/approvals/${encodeURIComponent(id)}`, token, approvalResponseSchema);
+}
+export function resolveApproval(id: string, operation: "approve" | "reject", rationale: string, token: string) {
+  return getFromControlPlane(`/api/v1/approvals/${encodeURIComponent(id)}/${operation}`, token, approvalResponseSchema, { rationale });
 }
