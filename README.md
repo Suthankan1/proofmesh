@@ -451,9 +451,13 @@ This opt-in suite uses disposable PostgreSQL, temporary P-256 signing keys, the 
 
 Agent credentials contain 256 random bits, with only their SHA-256 stored. Tenant-scoped rotation, expiry, revocation and disabled/suspended identity checks are tested, including concurrent rotation. Human administrators can rotate or revoke credentials through tenant-scoped HTTP endpoints. Runtime credentials authorize submission only; approvals require human OIDC authority. See [credential boundary](docs/security/agent-credentials.md), [runtime and approval APIs](docs/engineering/runtime-api.md), and [private local evidence archives](docs/operations/local-evidence-archives.md).
 
-Latest local verification on 2026-10-11: Java 629 discovered / 618 executed / 11 opt-in skipped, zero failures/errors; 11 authenticated cross-service tests passed separately; Go module verification/vet/full uncached race suite passed; six web tests/typecheck/lint/production build passed; five archive and three demo safety tests passed. Web checks and frozen-lockfile installation passed again after the security dependency update. These are local results, not a claim about remote CI. Full commands, browser evidence and limits are recorded in [local completion](docs/engineering/local-completion.md).
+Latest local verification on 2026-10-12: Java 629 discovered / 618 executed / 11 opt-in skipped, zero failures/errors; 11 authenticated cross-service tests passed separately; Go module verification/vet/full uncached race suite passed; six web tests/typecheck/lint/production build passed; five archive and three demo safety tests passed. Web checks and frozen-lockfile installation passed again after the security dependency update. These are local results, not a claim about remote CI. Full commands, browser evidence and limits are recorded in [local completion](docs/engineering/local-completion.md). The complete local regression gate, CI coverage and separate browser/image checks are documented in [local verification](docs/engineering/local-verification.md).
 
 ```sh
+# Complete local gate (Node 24, Java 25, Go, Python and Docker required):
+bash scripts/verify-local.sh
+
+# Individual checks:
 pnpm --filter web test
 pnpm --filter web exec tsc --noEmit --incremental false
 pnpm --filter web lint
@@ -464,4 +468,4 @@ python3 -m unittest discover -s scripts/dev -p 'test_local_demo.py'
 
 ## Project Status
 
-The local governance MVP is complete. Security incident administration still needs the exact f4d7145 detector location and dashboard verification; an unpatched development-tool advisory remains tracked. No vulnerability-free or production-security claim is made. Agent/policy provisioning is local setup; credential lifecycle is API-backed. Unknown tool outcomes and lost/expired issued authority remain fail closed; there is no cross-system business exactly-once guarantee. Publication/pushing requires separate authorization.
+The local governance MVP is complete. Security incident administration still needs the exact f4d7145 detector location and dashboard verification; an unpatched development-tool advisory remains tracked. No vulnerability-free or production-security claim is made. Agent/policy provisioning is local setup; credential lifecycle is API-backed. Unknown tool outcomes and lost/expired issued authority remain fail closed; there is no cross-system business exactly-once guarantee. The finishing verification batch is authorized for publication after all local checks pass. CI covers Java, Go, authenticated cross-service integration, web, local Python safety, runtime dependency advisories and hardened local image checks; it performs no deployment or image publication.

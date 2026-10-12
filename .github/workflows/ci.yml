@@ -9,7 +9,8 @@ permissions:
 
 jobs:
   control-plane:
-    name: Control Plane
+    name: Control Plane and authenticated integration
+    timeout-minutes: 30
     runs-on: ubuntu-latest
 
     defaults:
@@ -28,13 +29,22 @@ jobs:
           cache: maven
           cache-dependency-path: apps/control-plane/pom.xml
 
+      - name: Set up Go for cross-service fixtures
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: apps/gateway/go.mod
+          cache-dependency-path: apps/gateway/go.sum
+
       - name: Verify
-        run: |
-          chmod +x mvnw
-          ./mvnw --batch-mode --no-transfer-progress clean verify
+        run: ./mvnw --batch-mode --no-transfer-progress -Dsurefire.runOrder=random clean verify
+
+      - name: Authenticated local cross-service verification
+        working-directory: .
+        run: bash scripts/test-local-governance.sh
 
   gateway:
     name: Gateway
+    timeout-minutes: 30
     runs-on: ubuntu-latest
 
     defaults:
@@ -55,19 +65,62 @@ jobs:
         run: |
           go mod verify
           go vet ./...
-          go test -race ./...
+          go test -race -count=1 ./...
 
   operations:
-    name: Deployment gate and hardened images
+    name: Local script safety and hardened images
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Verify migration-before-rollout gate
-        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s infrastructure/kubernetes -p 'test_*.py'
+      - name: Verify local archive and demo safety
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_archive_local_evidence.py'
+          python3 -m unittest discover -s scripts/dev -p 'test_local_demo.py'
       - name: Build separate runtime artifacts
         run: |
           docker build --target gateway-runtime -t proofmesh-gateway:ci apps/gateway
           docker build --target migrate-runtime -t proofmesh-migrate:ci apps/gateway
       - name: Verify image security and failure smokes
         run: python3 scripts/verify-gateway-images.py proofmesh-gateway:ci proofmesh-migrate:ci
+
+  web:
+    name: Operator web and runtime dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up Node 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+      - name: Install pinned package manager and frozen dependencies
+        run: |
+          npm install --global pnpm@11.21.0
+          pnpm install --frozen-lockfile
+      - name: Verify web and runtime advisories
+        run: |
+          pnpm --filter web test
+          pnpm --filter web exec tsc --noEmit --incremental false
+          pnpm web:lint
+          pnpm audit --prod --audit-level=low
+      - name: Build operator web with synthetic local configuration
+        # Build-time validation only: no live database, credentials or identity provider.
+        env:
+          BETTER_AUTH_URL: http://localhost:13000
+          BETTER_AUTH_SECRET: synthetic-ci-only-auth-secret-never-use-outside-build
+          PROOFMESH_AUTH_DB_HOST: 127.0.0.1
+          PROOFMESH_AUTH_DB_PORT: "55440"
+          PROOFMESH_AUTH_DB_NAME: proofmesh_ci
+          PROOFMESH_AUTH_DB_USER: proofmesh_ci
+          PROOFMESH_AUTH_DB_PASSWORD: synthetic-ci-only
+          KEYCLOAK_ISSUER: http://localhost:18081/realms/proofmesh
+          KEYCLOAK_WEB_CLIENT_ID: proofmesh-web
+          KEYCLOAK_WEB_CLIENT_SECRET: synthetic-ci-only
+          CONTROL_PLANE_BASE_URL: http://localhost:18080
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: pnpm web:build
